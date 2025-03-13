@@ -6,6 +6,7 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 from scipy.optimize import minimize_scalar
 from scipy.stats import norm
 
+
 def find_best_threshold_for_predictions(y_true_train: np.ndarray,
                                         y_pred_train: np.ndarray,
                                         metric: str = 'specificity') -> float:
@@ -44,7 +45,9 @@ def find_best_threshold_for_predictions(y_true_train: np.ndarray,
     print(f"Best threshold based on {metric}: {best_threshold:.4f} with score: {best_metric_value:.4f}")
     return best_threshold
 
-def compute_metrics(y_pred: np.ndarray, y_true: np.ndarray) -> Dict[str, float]:
+def compute_metrics(y_pred: np.ndarray,
+                    y_true: np.ndarray,
+                    prevalence:float=None) -> Dict[str, float]:
     """
     Compute classification metrics including sensitivity and specificity with confidence intervals.
 
@@ -52,9 +55,11 @@ def compute_metrics(y_pred: np.ndarray, y_true: np.ndarray) -> Dict[str, float]:
     :param y_true: array of true labels (binary)
     :return: Dictionary containing metrics and their confidence intervals.
     """
+    # Set constant prevalence (30 per 100,000 adults) for Narcolepsy
+    if prevalence is None:
+        prevalence = 30 / 100000  # which is 0.0003
 
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
-
     # Compute metrics
     sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
     specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
@@ -64,6 +69,10 @@ def compute_metrics(y_pred: np.ndarray, y_true: np.ndarray) -> Dict[str, float]:
     npv = tn / (tn + fn) if (tn + fn) > 0 else 0
     fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
     fnr = fn / (fn + tp) if (fn + tp) > 0 else 0
+    # Compute PPV using constant prevalence via Bayes' theorem.
+    # This adjusts PPV for a target population prevalence rather than the sample prevalence.
+    denominator = (sensitivity * prevalence) + ((1 - specificity) * (1 - prevalence))
+    ppv = (sensitivity * prevalence) / denominator if denominator > 0 else 0
 
     return {
         'sensitivity': sensitivity,
@@ -73,7 +82,8 @@ def compute_metrics(y_pred: np.ndarray, y_true: np.ndarray) -> Dict[str, float]:
         'f1_score': f1_score,
         'npv': npv,
         'fpr': fpr,
-        'fnr': fnr
+        'fnr': fnr,
+        'ppv': ppv,
     }
 
 
@@ -83,7 +93,8 @@ def compute_confidence_interval(values: list) -> str:
     std_error = np.std(values, ddof=1) / np.sqrt(len(values))  # Standard Error
     margin = norm.ppf(0.975) * std_error  # 1.96 * std_error for 95% CI
     ci = max(0, mean_val - margin), min(1, mean_val + margin)
-    return f'{mean_val:.2}, ({float(ci[0]):.3}, {float(ci[1]):.3})'
+    mean_val = str(round(mean_val, 3))[0:4]  # mean value < upper CI, so we cannot truncate at output
+    return f'{mean_val},\n({float(ci[0]):.3}, {float(ci[1]):.3})'
 
 
 def apply_veto_rule_re_classifications(df_classifications:pd.DataFrame,
@@ -115,7 +126,7 @@ def apply_veto_rule_re_classifications(df_classifications:pd.DataFrame,
 
     # If classification is FP (true=0,pred=1) & HLA is False & DQB10602 == 0, apply veto rule
     # NT1 cases are always HLA positive
-    mask = (df_classifications['classification'].isin({'FP'})) & \
+    mask_veto = (df_classifications['classification'].isin({'FP'})) & \
            (df_classifications['DQB10602'] == 0)
     # Optional, Step 1: Count how many observations per config and model we are applying the veto rule
     df_filtered = df_classifications[
@@ -134,7 +145,7 @@ def apply_veto_rule_re_classifications(df_classifications:pd.DataFrame,
     print(df_pivot)
 
     # we are setting them to zero as prediction
-    df_classifications.loc[mask, 'predicted_hla_veto'] = df_classifications.loc[mask, 'predicted_hla_veto'] - 1
+    df_classifications.loc[mask_veto, 'predicted_hla_veto'] = df_classifications.loc[mask_veto, 'predicted_hla_veto'] - 1
 
     # Step 3: re-compute the metrics and obtain the averages across the folds
     metrics_records = []
@@ -156,7 +167,7 @@ def apply_veto_rule_re_classifications(df_classifications:pd.DataFrame,
 
     df_agg_metrics = pd.DataFrame(metrics_records)
     df_agg_metrics = df_agg_metrics[
-        ['config', 'model', 'fold'] + [col for col in df_agg_metrics.columns if col not in ['model', 'fold', 'config']]]
+        ['model', 'config', 'fold'] + [col for col in df_agg_metrics.columns if col not in ['model', 'fold', 'config']]]
 
     # Step 4: Compute confidence intervals for sensitivity and specificity
     df_ci = []
@@ -322,3 +333,48 @@ def decision_curve_analysis(models,
 #     plt.grid(True)
 #     plt.tight_layout()
 #     plt.show()
+
+
+def calculate_ppv(SE, SP, prevalence):
+    """
+    Calculate the positive predictive values for a given sensitivity and specificity score.
+    :param SE:
+    :param SP:
+    :param prevalence:
+    :return:
+    """
+    PPV = (SE * prevalence) / ((SE * prevalence) + ((1 - SP) * (1 - prevalence)))
+    return np.round(PPV, 3)
+
+
+def recompute_classification(df):
+    """
+    Recomputes the 'classification' column based on 'true_label' and 'predicted_hla_veto'.
+
+    Parameters:
+        df (pd.DataFrame): The DataFrame containing 'true_label' and 'predicted_hla_veto'.
+
+    Returns:
+        pd.DataFrame: Updated DataFrame with the corrected 'classification' column.
+    """
+    conditions = [
+        (df['true_label'] == 1) & (df['predicted_hla_veto'] == 1),
+        (df['true_label'] == 0) & (df['predicted_hla_veto'] == 1),
+        (df['true_label'] == 0) & (df['predicted_hla_veto'] == 0),
+        (df['true_label'] == 1) & (df['predicted_hla_veto'] == 0)
+    ]
+    classifications = ['TP', 'FP', 'TN', 'FN']
+
+    df['classification'] = np.select(conditions, classifications, default='Unknown')
+
+    return df
+
+
+def extract_metrics(df):
+    """Extracts classification counts and ensures all categories exist."""
+    metrics = df.groupby(['model_name', 'fold'])['classification'].value_counts().unstack(fill_value=0)
+    metrics.reset_index(inplace=True, drop=True)
+    for col in ['FN', 'FP', 'TN', 'TP']:
+        if col not in metrics.columns:
+            metrics[col] = 0
+    return metrics

@@ -233,21 +233,35 @@ class MakeTableOne:
         """
         if category is not None:
             count = frame.loc[frame[col] == category, col].shape[0]
+            non_nan_count = frame.loc[~frame[col].isna()].shape[0]  # use the non-nan count
             if frame.shape[0] == 0:
                 return f'0'
             else:
-                cell = f'{count} ({np.round((count / frame.shape[0]) * 100, decimal)}%)'
+                if non_nan_count > 0:
+                    cell = f'{count} ({np.round((count / non_nan_count) * 100, decimal)}%)'
+                else:
+                    cell = f'{count} (-%)'
+
             return cell
         else:
             # return the count ordered by the index
             count = frame[col].value_counts()
             count = count.sort_index()
+            non_nan_count = frame.loc[~frame[col].isna()].shape[0]  # use the non-nan count
+
             if count.shape[0] == 1:
                 # binary data so counting the ones
-                cell = f'{count[1]} ({np.round((count[1] / frame.shape[0]) * 100, decimal)}%)'
+                if non_nan_count > 0:
+                    cell = f'{count[1]} ({np.round((count[1] / non_nan_count) * 100, decimal)}%)'
+                else:
+                    cell = f'{count} (0%)'
+
                 return cell
             else:
-                cell = [f'{count_} ({np.round((count_ / frame.shape[0]) * 100, decimal)}%)' for count_ in count]
+                if non_nan_count > 0:
+                    cell = [f'{count_} (0%)' for count_ in count]
+                else:
+                    cell = [f'{count_} (0%)' for count_ in count]
                 return cell
 
     def remove_reference_categories(self):

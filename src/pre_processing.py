@@ -67,7 +67,6 @@ def pre_process_ssqdx_dataset(dataset_path:pathlib.Path) -> pd.DataFrame:
         # Check for missing values in relevant columns
         if pd.isna(row['DQB10602']) or pd.isna(row['contains_A_to_F']):
             return 'undefined'
-
         # Diagnosis logic based on DQB10602 and contains_A_to_F criteria
         if row['DQB10602'] == 1 and row['contains_A_to_F']:
             return 'narcolepsy'
@@ -88,7 +87,6 @@ def pre_process_ssqdx_dataset(dataset_path:pathlib.Path) -> pd.DataFrame:
     df_ssqdx['Dx'] = df_ssqdx['Dx'].astype(str)
     df_ssqdx['contains_A_to_F'] = df_ssqdx.apply(contains_a_to_f, axis=1)
     df_ssqdx['narcolepsy'] = df_ssqdx.apply(set_narcolepsy, axis=1)
-
     # %% rename columns
     mapper_q = [
         'Q:86',
@@ -729,10 +727,36 @@ if __name__ == "__main__":
         '9': np.nan,
     })
 
-    df_ssqdx['NAPS'].unique()
+    # df_ssqdx['NAPS'].unique()
     df_ssq.loc[df_ssq['39_nap_frequency'] > 100, '39_nap_frequency'] = np.nan
+    df_ssqdx['NAPS'].value_counts()
+    df_ssq['39_nap_frequency'].value_counts()
 
-    df_ssqdx['NAPS'].unique()
+    # %% visualization naps: start
+    if PLOT:
+        sns.countplot(x='39_nap_frequency', data=df_ssq)
+        plt.xticks(rotation=45)  # Rotate labels if needed
+        plt.show()
+
+        column_name = 'NAPS'
+        df_naps = df_ssqdx.copy()
+        # Compute value counts and convert to DataFrame
+        counts = df_naps[column_name].value_counts().reset_index()
+        counts.columns = [column_name, 'count']
+        counts = counts.sort_values(by='count', ascending=False)
+        sns.set_style("whitegrid")
+        plt.figure(figsize=(12, 6))
+        ax = sns.barplot(x=column_name, y='count', data=counts)
+        plt.xticks(rotation=45)
+        plt.xlabel('Column Value')
+        plt.ylabel('Count')
+        plt.title('Value Counts of Column')
+        plt.tight_layout()
+        plt.show()
+
+
+    # %% visualizatio naps: end
+    # df_ssqdx['NAPS'].unique()
     df_ssq['45_sleepiness_severity_since_age'].value_counts()
     print(df_ssq['narcolepsy'].value_counts())
 
@@ -864,8 +888,8 @@ if __name__ == "__main__":
     df_ssq_to_merge.rename(mapper_inv, inplace=True, axis=1)
     df_ssq_to_merge['DQB10602'].value_counts()
     # %% include the missing columns (not measure from the questionnaire)
-    df_ssqdx.shape
-    df_ssq_to_merge.shape
+    # df_ssqdx.shape
+    # df_ssq_to_merge.shape
     for col in df_ssqdx.columns:
         if not col in df_ssq_to_merge.columns:
             # print(col)
@@ -955,9 +979,18 @@ if __name__ == "__main__":
     columns = cols_head + col_middle + cols_tail
     df_data = df_data[columns]
 
+    # keep the binary nature of the variable
+    df_data['DISNOCSLEEP'] = df_data['DISNOCSLEEP'].clip(upper=1)
+
+    # %% Check agin the DX columns to
+    # Ant A-F is narcolepsy, if outside then pseudo narcolepsy
 
     # %% Filter and Clean the diagnosis
     df_data['narcolepsy'] = df_data['narcolepsy'].replace({'non-narcolepsy': 'non-narcoleptic'})
+    # remove rows that in the Dx columns they contain Gm H/A, H/D
+    pattern = r'G|H/A|H/D'
+    # df_ssqdx['pattern'] = df_ssqdx['Dx'].str.contains(pattern, na=False)
+    df_data = df_data[~df_data['Dx'].str.contains(pattern, na=False)]
     # harmonize the narcolepsy column
     # assert the unique values
     assert df_data['narcolepsy'].value_counts().shape[0] == 4
@@ -965,6 +998,8 @@ if __name__ == "__main__":
     assert df_data['cataplexy_clear_cut'].value_counts().shape[0] == 2
 
     verification_results,tabs, df_data = wrangle_target_combinations(df=df_data)
+    # df_data.cataplexy_clear_cut.value_counts()  # check we have cases and controls
+    df_data = df_data.loc[~df_data['DQB10602'].isna(),:]
 
     # %% Imputation Age, Sex and ESS
     categorical_var = ['sex',
@@ -973,7 +1008,7 @@ if __name__ == "__main__":
                        'EMOTIONAL', 'QUICKVERBAL', 'EMBARRAS', 'DISCIPLINE',
                        'SEX', 'DURATHLETIC', 'AFTATHLETIC', 'ELATED', 'STRESSED',
                        'STARTLED', 'TENSE', 'PLAYGAME', 'ROMANTIC', 'JOKING', 'MOVEDEMOT',
-                       'KNEES', 'JAW', 'HEAD', 'HAND', 'SPEECH',
+                       'KNEES', 'JAW', 'HEAD', 'HAND', 'SPEECH', 'DISNOCSLEEP'
                        # 'DURATION', 'CATSEVER',
                        # 'ONSET', 'HALLUC', 'HHONSET', 'HHSEVERITY', 'SP', 'SPSEVER', 'SPONSET',
                        # 'SPMEDS', 'FREQ', 'INJURED', 'POSEMOT', 'NEGEMOT', 'NDEMOT', 'CATCODE',
@@ -981,7 +1016,7 @@ if __name__ == "__main__":
                        # 'cataplexy_sampled', 'cataplexy'
                        ]
 
-    continuous_var = ['Age', 'BMI', 'ESS', 'DISNOCSLEEP', 'NAPS', 'SLEEPIONSET', 'ONSET']
+    continuous_var = ['Age', 'BMI', 'ESS', 'NAPS', 'SLEEPIONSET', 'ONSET']  # DISNOCSLEEP
     columns = list(set(categorical_var + continuous_var))
 
     df_nan_count = df_data.isna().sum(0)
@@ -1030,7 +1065,9 @@ if __name__ == "__main__":
     assert df_imputed['DQB10602'].isna().sum() == 0
 
     #%% save dataset
-    df_imputed.to_csv(config.get('data_pre_proc_files').get('ssq_ssqdx'), index=False)
+    df_imputed.to_csv(config.get('data_pre_proc_files').get('ssq_ssqdx_imputed'), index=False)
+
+    df_data.to_csv(config.get('data_pre_proc_files').get('ssq_ssqdx'), index=False)
 
 
 

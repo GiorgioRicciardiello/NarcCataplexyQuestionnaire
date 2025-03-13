@@ -14,6 +14,7 @@ data_raw_ssq = data_raw_path.joinpath('ssi_validation_older_added_hla.xlsx')
 # Define pre-processed data path and individual pre-processed data files
 data_pre_proc_path = root_path.joinpath('data', 'pproc')
 data_pp_ssq_merged_ssqdx = data_pre_proc_path.joinpath('SSQDX_pp.csv')
+data_pp_ssq_merged_ssqdx_imputed = data_pre_proc_path.joinpath('SSQDX_imputed_pp.csv')
 
 
 # Define results path
@@ -31,6 +32,7 @@ config = {
     },
     'data_pre_proc_files': {
         'ssq_ssqdx': data_pp_ssq_merged_ssqdx,
+        'ssq_ssqdx_imputed':data_pp_ssq_merged_ssqdx_imputed,
     },
 
     'results_path': {
