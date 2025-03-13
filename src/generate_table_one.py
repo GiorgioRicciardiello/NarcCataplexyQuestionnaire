@@ -6,33 +6,34 @@ import numpy as np
 import pandas as pd
 from library.table_one import MakeTableOne
 from typing import Dict, List, Optional
-from scipy.stats import fisher_exact, spearmanr, mannwhitneyu, shapiro, ttest_ind
+from scipy.stats import fisher_exact, spearmanr, mannwhitneyu, shapiro, ttest_ind, chi2_contingency
 from tabulate import tabulate
+
+
 def stats_test_binary_symptoms(data: pd.DataFrame,
                                columns: List[str],
                                strata_col: str = 'NT1',
                                SHOW: Optional[bool] = False
                                ) -> pd.DataFrame:
     """
-    Using the binary values (with 1 as a positive response), perform Fisher's exact test
-    comparing the distribution between genders.
+    Perform Chi-Square Test or Fisher's Exact Test for binary values (1 as positive response)
+    comparing the distribution between two groups.
 
     Parameters
     ----------
     data : pd.DataFrame
-        DataFrame containing the symptom responses and the gender column.
+        DataFrame containing binary symptom responses and the group column.
     columns : List[str]
-        Columns to perform the statistical test.
+        Columns to perform the statistical test on.
     strata_col : str, default 'NT1'
-        Column name for the gender grouping.
+        Column name for the grouping variable.
     SHOW : bool, default False
-        print the 2x2 table for each test
+        Print the 2x2 contingency table for each test.
 
     Returns
     -------
     pd.DataFrame
-        DataFrame with counts, percentages, p-value and odds ratio from Fisher's exact test,
-        and a column indicating the test method used.
+        DataFrame with counts, percentages, p-value, effect size (odds ratio), and test method used.
     """
     results = []
 
@@ -40,22 +41,22 @@ def stats_test_binary_symptoms(data: pd.DataFrame,
     get_counts_rates = lambda cond: (cond.sum(), cond.mean() * 100)
 
     if not len(data[strata_col].unique()) == 2:
-        raise ValueError(f'Strata column {strata_col} has more than 2 groups')
-    group0 = data[target].unique()[0]
-    group1 = data[target].unique()[1]
-    # Loop over each symptom.
+        raise ValueError(f'Strata column {strata_col} must have exactly 2 groups')
+
+    group0, group1 = data[strata_col].unique()
+
     for col in columns:
         if col == strata_col:
             continue
-        print(col)
-        # Create a local copy that includes the symptom and the gender column.
+
         df = data[[col, strata_col]].dropna().copy()
 
-        # Check if the symptom data are binary.
+        # Ensure binary values
         unique_vals = set(df[col].unique())
         if unique_vals != {0, 1}:
             continue
-        # For each gender group, count the number of positive responses (i.e. value == 1).
+
+        # Count responses for each group
         grp0 = (df[df[strata_col] == group0][col] == 1)
         grp1 = (df[df[strata_col] == group1][col] == 1)
 
@@ -63,46 +64,47 @@ def stats_test_binary_symptoms(data: pd.DataFrame,
         group1_n, group1_rate = get_counts_rates(grp1)
         total_n, total_rate = get_counts_rates(df[col] == 1)
 
-        # Build the 2x2 contingency table.
-        # Rows: gender groups; Columns: positive and negative responses.
+        # Create 2x2 contingency table
         table = [
             [group0_n, df[df[strata_col] == group0].shape[0] - group0_n],
             [group1_n, df[df[strata_col] == group1].shape[0] - group1_n]
         ]
+
+        # Display table if SHOW is True
         if SHOW:
-            # Define headers for the columns.
             headers = [f"{col} {group0}", f"{col} {group1}"]
             row_labels = [f"{strata_col} {group0}", f"{strata_col} {group1}"]
-            # Combine row labels with table rows if desired.
             table_with_labels = [[row_labels[i]] + row for i, row in enumerate(table)]
             headers_with_labels = ["Group"] + headers
-            print(tabulate(table_with_labels, headers=headers_with_labels,
-                           tablefmt="grid"))
+            print(tabulate(table_with_labels, headers=headers_with_labels, tablefmt="grid"))
 
-        # Perform Fisher's exact test.
-        odds_ratio, p_fisher = fisher_exact(table, alternative='two-sided')
+        # Compute expected counts for Chi-Square condition
+        chi2_stat, p_chi2, dof, expected = chi2_contingency(table)
+        expected_min = expected.min()
+
+        if expected_min < 5:
+            # Use Fisher's Exact Test if any expected count is <5
+            odds_ratio, p_value = fisher_exact(table, alternative='two-sided')
+            test_method = "Fisher's Exact Test"
+        else:
+            # Use Chi-Square Test otherwise
+            odds_ratio, p_value = (None, p_chi2)  # No odds ratio for Chi-Square
+            test_method = "Chi-Square Test"
+
+        # Store results
         res = {
             'Variable': col,
-            # f'{strata_col} {group0} (n)': round(group0_n, 1),
-            # f'{strata_col} {group0} (%)': round(group0_rate, 1),
             f'{strata_col} {group0} N, (%)': f'{round(group0_n, 1)} ({round(group0_rate, 1)})',
-            # f'{strata_col} {group1} (n)': round(group1_n, 1),
-            # f'{strata_col} {group1}  (%)': round(group1_rate, 1),
             f'{strata_col} {group1} N, (%)': f'{round(group1_n, 1)} ({round(group1_rate, 1)})',
-            # 'Total (n)': round(total_n, 1),
-            # 'Total (%)': round(total_rate, 1),
             'Total N, (%)': f'{round(total_n, 1)} ({round(total_rate, 1)})',
-
-            'p-value': p_fisher,
-            'p-value formatted': f"{p_fisher:.4f}" if p_fisher >= 0.0001 else "<0.0001",
-            'Effect Size (Odds Ratio)': round(odds_ratio, 3),
-            'Stat Method': "Fisher's Exact Test"
+            'p-value': p_value,
+            'p-value formatted': f"{p_value:.4f}" if p_value >= 0.0001 else "<0.0001",
+            'Effect Size (Odds Ratio)': round(odds_ratio, 3) if odds_ratio is not None else "N/A",
+            'Stat Method': test_method
         }
         results.append(res)
 
     return pd.DataFrame(results)
-
-
 def stats_test_continuous(data: pd.DataFrame,
                           columns: List[str],
                           strata_col: str = 'NT1',
@@ -244,9 +246,16 @@ if __name__ == '__main__':
                        'JOKING', 'MOVEDEMOT', 'KNEES', 'JAW', 'HEAD', 'HAND', 'SPEECH',
                        'DQB10602', 'sex', 'DISNOCSLEEP']
     categorical_var = list(np.sort(categorical_var))
+
+    for col in categorical_var:
+        print(f'\n{col} - {df_data[col].unique()}')
+        print(f'\n{col} - {df_data[col].value_counts()}')
+        print(f'\n{col} - {df_data.groupby(by=col)[target].count()}')
+
     df_stats_bin = stats_test_binary_symptoms(data=df_data,
                                columns=categorical_var,
-                               strata_col=target)
+                               strata_col=target,
+                                SHOW=True)
 
     df_stats_cont = stats_test_continuous(
                 data=df_data,
