@@ -6,7 +6,6 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 from scipy.optimize import minimize_scalar
 from scipy.stats import norm
 
-
 def find_best_threshold_for_predictions(y_true_train: np.ndarray,
                                         y_pred_train: np.ndarray,
                                         metric: str = 'specificity') -> float:
@@ -45,6 +44,20 @@ def find_best_threshold_for_predictions(y_true_train: np.ndarray,
     print(f"Best threshold based on {metric}: {best_threshold:.4f} with score: {best_metric_value:.4f}")
     return best_threshold
 
+def bootstrap_auc_ci(y_true, y_prob, n_bootstraps=1000, ci=0.95):
+    aucs = []
+    rng = np.random.RandomState(42)
+    for _ in range(n_bootstraps):
+        indices = rng.choice(np.arange(len(y_true)), size=len(y_true), replace=True)
+        if len(np.unique(y_true[indices])) < 2:
+            continue  # Skip if resampled set doesn't have both classes
+        auc = roc_auc_score(y_true[indices], y_prob[indices])
+        aucs.append(auc)
+    aucs = np.array(aucs)
+    lower = np.percentile(aucs, ((1 - ci) / 2) * 100)
+    upper = np.percentile(aucs, (1 - (1 - ci) / 2) * 100)
+    return np.mean(aucs), (lower, upper)
+
 def compute_metrics(y_pred: np.ndarray,
                     y_true: np.ndarray,
                     prevalence:float=None) -> Dict[str, float]:
@@ -78,12 +91,12 @@ def compute_metrics(y_pred: np.ndarray,
         'sensitivity': sensitivity,
         'specificity': specificity,
         'accuracy': accuracy,
-        'precision': precision,
+        'ppv_apparent': precision,  # true positive rate in your test fold
         'f1_score': f1_score,
         'npv': npv,
         'fpr': fpr,
         'fnr': fnr,
-        'ppv': ppv,
+        'ppv': ppv, # prevalence-adjusted using Bayes
     }
 
 
@@ -93,8 +106,8 @@ def compute_confidence_interval(values: list) -> str:
     std_error = np.std(values, ddof=1) / np.sqrt(len(values))  # Standard Error
     margin = norm.ppf(0.975) * std_error  # 1.96 * std_error for 95% CI
     ci = max(0, mean_val - margin), min(1, mean_val + margin)
-    mean_val = str(round(mean_val, 3))[0:4]  # mean value < upper CI, so we cannot truncate at output
-    return f'{mean_val},\n({float(ci[0]):.3}, {float(ci[1]):.3})'
+    mean_val = str(round(mean_val, 4))[0:5]  # mean value < upper CI, so we cannot truncate at output
+    return f'{mean_val},\n({float(ci[0]):.4}, {float(ci[1]):.4})'
 
 
 def apply_veto_rule_re_classifications(df_classifications:pd.DataFrame,

@@ -2,6 +2,7 @@
 Use the preprocess dataset and generate the table one.
 """
 from config.config import config
+from config.SSI_Digitial_Questionnaire import variable_definitions
 import numpy as np
 import pandas as pd
 from library.table_one import MakeTableOne
@@ -65,10 +66,12 @@ def stats_test_binary_symptoms(data: pd.DataFrame,
         total_n, total_rate = get_counts_rates(df[col] == 1)
 
         # Create 2x2 contingency table
-        table = [
-            [group0_n, df[df[strata_col] == group0].shape[0] - group0_n],
-            [group1_n, df[df[strata_col] == group1].shape[0] - group1_n]
-        ]
+        # Create contingency table
+        a = group0_n
+        b = df[df[strata_col] == group0].shape[0] - group0_n
+        c = group1_n
+        d = df[df[strata_col] == group1].shape[0] - group1_n
+        table = [[a, b], [c, d]]
 
         # Display table if SHOW is True
         if SHOW:
@@ -87,8 +90,12 @@ def stats_test_binary_symptoms(data: pd.DataFrame,
             odds_ratio, p_value = fisher_exact(table, alternative='two-sided')
             test_method = "Fisher's Exact Test"
         else:
-            # Use Chi-Square Test otherwise
-            odds_ratio, p_value = (None, p_chi2)  # No odds ratio for Chi-Square
+            # Use Chi-Square Test and compute OR manually
+            p_value = p_chi2
+            try:
+                odds_ratio = (a * d) / (b * c) if b * c != 0 else np.nan
+            except ZeroDivisionError:
+                odds_ratio = np.nan
             test_method = "Chi-Square Test"
 
         # Store results
@@ -105,6 +112,7 @@ def stats_test_binary_symptoms(data: pd.DataFrame,
         results.append(res)
 
     return pd.DataFrame(results)
+
 def stats_test_continuous(data: pd.DataFrame,
                           columns: List[str],
                           strata_col: str = 'NT1',
@@ -257,8 +265,21 @@ if __name__ == '__main__':
                                strata_col=target,
                                 SHOW=True)
 
+    df_stats_bin['Variable'] = df_stats_bin['Variable'].replace(variable_definitions)
+
+    df_stats_bin = df_stats_bin.sort_values(by='Variable', ascending=True)
+
+
     df_stats_cont = stats_test_continuous(
                 data=df_data,
                 columns=list(continuous_var),
                 strata_col='NT1',
                 SHOW=True)
+
+
+
+    df_stats_cont['Variable'] = df_stats_cont['Variable'].replace(variable_definitions)
+
+
+
+

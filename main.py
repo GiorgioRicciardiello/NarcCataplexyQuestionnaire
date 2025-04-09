@@ -1,10 +1,16 @@
 from config.config import config
 import numpy as np
 import pandas as pd
-from library.ml_models import compute_cross_validation, models, make_veto_dataset
+from library.ml_models import (compute_cross_validation,
+                               models,
+                               make_veto_dataset,
+                               load_imputed_folds,
+                               summarize_fold_consistency)
 from library.metrics_functions import apply_veto_rule_re_classifications
 from library.plot_functions import (plot_model_metrics, plot_model_metrics_specific_columns,
-                                    create_venn_diagram, plot_elastic_net_model_coefficients, plot_dcurves_per_fold)
+                                    create_venn_diagram, plot_elastic_net_model_coefficients,
+                                    plot_dcurves_per_fold, ppv_curve,multi_ppv_plot_combined, plot_calibration,
+                                    multi_ppv_plot, multi_calibration_plot)
 from library.metrics_functions import recompute_classification, extract_metrics
 from typing import Optional, Tuple, List
 
@@ -16,7 +22,8 @@ if __name__ == '__main__':
     df_data.rename(columns={'cataplexy_clear_cut': 'NT1'}, inplace=True)
 
     # %% output paths
-    TEST = True
+    TEST = False
+    OVERWRITE = True
     test = 'test_' if TEST else ''
     path_avg_metrics_config = config.get('results_path').get('results').joinpath(f'{test}avg_metrics_config.csv')
     path_classifications_config = config.get('results_path').get('results').joinpath(f'{test}classifications_config.csv')
@@ -26,7 +33,6 @@ if __name__ == '__main__':
     path_feature_importance = config.get('results_path').get('results').joinpath(f'{test}feature_importance.csv')
     path_pred_prob_elastic = config.get('results_path').get('results').joinpath(f'{test}pred_prob_elasticnet.csv')
     # path_avg_paper_veto = config.get('results_path').get('results').joinpath(f'avg_paper_veto.csv')
-
     # %% Select columns and drop columns with nans
     target = 'NT1'
     categorical_var = ['sex', 'LAUGHING', 'ANGER', 'EXCITED',
@@ -51,8 +57,8 @@ if __name__ == '__main__':
     # col_ukbb = ['Age', 'BMI', 'sex', 'ESS', 'JAW', 'HEAD', 'HAND',
     #             'SPEECH', 'JOKING', 'LAUGHING', 'ANGER',
     #             'QUICKVERBAL']
-    col_ukbb = ['BMI', 'ESS', 'JAW', 'HEAD', 'HAND',
-                'SPEECH', 'JOKING', 'LAUGHING', 'ANGER', 'KNEES',
+    col_ukbb = ['BMI', 'ESS', 'JAW', 'HEAD', 'HAND', 'KNEES',
+                'SPEECH', 'JOKING', 'LAUGHING', 'ANGER',
                 'QUICKVERBAL']
 
     # some columns are not available because of missigness e.g., BMI
@@ -85,28 +91,40 @@ if __name__ == '__main__':
 
     }
 
+    feature_set_mapper = {
+        f'questionnaire': f'Full feature set (k={len(configurations.get("questionnaire").get("features"))})',
+        'questionnaire_hla': f'Full Feature Set + DQB1*06:02  (k={len(configurations.get("questionnaire_hla").get("features"))})',
+        'ukbb': f'Reduced Feature Set (k={len(configurations.get("ukbb").get("features"))})',
+        'ukbb_hla': f'Reduced Feature Set + DQB1*06:02 (k={len(configurations.get("ukbb_hla").get("features"))})',
+    }
+    for key, val in feature_set_mapper.items():
+        print(f'\t{key}: {val}')
+
+    for key, dictionary in configurations.items():
+        num_feature = len(dictionary.get('features'))
+        print(f'{key}: {num_feature}')
+
+
     # Create a Venn diagram comparing "questionnaire" and "ukbb"
     create_venn_diagram(
         configs=configurations,
         config1="questionnaire",
         config2="ukbb",
-        figure_size=(6, 6),
+        figure_size=(9, 8),
         set_labels=("Full Questionnaire Feature Set", "Reduces Feature Set"),
         colors=('pink', 'orange'),
         alpha=0.7,
         title="Venn Diagram of Questionnaire vs. UKBB Features"
     )
-    for key, dictionary in configurations.items():
-        num_feature = len(dictionary.get('features'))
-        print(f'{key}: {num_feature}')
 
-    # run the analysis
-    if not (path_avg_metrics_config.is_file() and path_classifications_config.is_file()):
+    # run the analysis if the files do not exist or it overwrite is set to True
+    if not (path_avg_metrics_config.is_file() and path_classifications_config.is_file()) or OVERWRITE:
         df_feature_importance = pd.DataFrame()
         df_avg_metrics_models = {}
         k = 5
         df_classifications_configs = pd.DataFrame()
         df_metrics_configs = pd.DataFrame()
+        df_elastic_pred_config = pd.DataFrame()
         for conf_name, conf_values in configurations.items():
             # conf_name = 'questionnaire_hla'
             # conf_values = configurations.get(conf_name)
@@ -133,6 +151,9 @@ if __name__ == '__main__':
             # elastic net feature importance
             df_elastic_params['configuration'] = conf_name
             df_feature_importance = pd.concat([df_feature_importance, df_elastic_params])
+            # elastic net predictions
+            df_elastic_pred['configuration'] = conf_name
+            df_elastic_pred_config = pd.concat([df_elastic_pred_config, df_elastic_pred])
 
         df_classifications_configs.reset_index(inplace=True, drop=True)
         df_metrics_configs.reset_index(inplace=True, drop=True)
@@ -147,12 +168,12 @@ if __name__ == '__main__':
         # df_metrics_configs[['config', 'model', 'specificity']]
         df_classifications_configs.to_csv(path_classifications_config, index=False)
         df_feature_importance.to_csv(path_feature_importance, index=False)
-        df_elastic_pred.to_csv(path_pred_prob_elastic, index=False)
-
+        df_elastic_pred_config.to_csv(path_pred_prob_elastic, index=False)
     else:
         df_metrics_configs = pd.read_csv(path_avg_metrics_config)
         df_classifications_configs = pd.read_csv(path_classifications_config)
         df_feature_importance = pd.read_csv(path_feature_importance)
+        df_elastic_pred_config = pd.read_csv(path_pred_prob_elastic)
 
     # sort the frames
     df_metrics_configs = df_metrics_configs.sort_values(by=['model', 'config', 'specificity'],
@@ -167,6 +188,7 @@ if __name__ == '__main__':
     df_veto_avg_metrics = df_veto_avg_metrics.sort_values(by=['model', 'config', 'specificity'],
                                    ascending=[False, True, False]
                                    )
+    # df_veto_avg_metrics['config'].replace(feature_set_mapper, inplace=True)
     df_veto_avg_metrics.to_csv(path_avg_metrics_veto, index=False)
 
     # %% Merge the avg fold metrics before and after the veto to have all in one dataset. Merge by model and config pairs
@@ -183,6 +205,7 @@ if __name__ == '__main__':
     df_avg_metrics = df_avg_metrics.sort_values(by=['config', 'specificity'],
                                                         ascending=[True, False])  # ['config', 'model']
 
+    df_avg_metrics['config'].replace(feature_set_mapper, inplace=True)
     df_avg_metrics.to_csv(path_avg_paper, index=False)
 
 
@@ -288,22 +311,17 @@ if __name__ == '__main__':
 
         'FN_HLA_False_After_Veto', 'FP_HLA_False_After_Veto', 'TN_HLA_False_After_Veto', 'TP_HLA_False_After_Veto'
     ])
+    # %%
+    #       Evaluation Best Model - Elastic net
+    #       Using the true, pred, pred_prob obtained for each fold and for each feature set
+    #
     # %% Feature importance plot
     # Re-import necessary libraries after execution state reset
 
-    df_feature_importance['configuration'].replace({
-        'questionnaire': 'Full feature set (k=27)',
-        'questionnaire_hla': 'Full Feature Set + DQB1*06:02  (k=28)',
-        'ukbb': 'Reduced Feature Set (k=9)',
-        'ukbb_hla': 'Reduced Feature Set + DQB1*06:02 (k=10)',
-    }, inplace=True)
-
-
+    df_feature_importance['configuration'].replace(feature_set_mapper, inplace=True)
 
     plot_elastic_net_model_coefficients(df_feature_importance,
-                                        output_path=None,
-                                        figsize=(10, 12),
-                                        colormap='tab10')
+                                        output_path=None,)
 
 
     # %% decison curve
@@ -315,4 +333,53 @@ if __name__ == '__main__':
     prevalence = 30 / 100000  # i.e., 0.0003
     plot_dcurves_per_fold(df_results=df_elastic_pred, prevalence=prevalence)
 
+    # %% Prevalance plot
+    best_model = 'Elastic Net'
+    # all in one figure
+    # multi_ppv_plot(df_avg_metrics=df_avg_metrics,
+    #                model_name=best_model,
+    #                rows=2,
+    #                figsize=(12,8),
+    #                output_path=None)
 
+    multi_ppv_plot_combined(df_predictions_model=df_elastic_pred_config,
+                   figsize=(10,6),
+                   output_path=None)
+
+    # %% calibration plot
+
+    df_elastic_pred_config['configuration'].replace(feature_set_mapper, inplace=True)
+
+    # all in one figure
+    df_brier_scores = multi_calibration_plot(df_predictions=df_elastic_pred_config,
+                           model_name=best_model,
+                           rows=2,
+                           output_path=None)
+
+
+    df_grouped = df_brier_scores.groupby('configuration').agg(
+        brier_score=('brier_score', lambda x: f"{x.mean():.4f} ({x.std():.4f})"),
+        log_loss=('log_loss', lambda x: f"{x.mean():.4f} ({x.std():.4f})"),
+        auc=('auc', lambda x: f"{x.mean():.4f} ({x.std():.4f})")
+    ).reset_index()
+
+    df_grouped['configuration'].replace(feature_set_mapper, inplace=True)
+
+    # %% Check feature distribution across the folds
+    # Load folds
+    imputed_folds = load_imputed_folds(save_path=r'C:\Users\giorg\OneDrive - Fundacion Raices Italo Colombianas\projects\NarcCataplexyQuestionnaire\data')
+
+    # Extract features from one fold
+    df_sample = imputed_folds[0]['train_data']
+    target_name = 'target'  # Replace with your actual target column name
+    # get feature names
+    feature_names = [col for col in df_sample.columns if col != target_name]
+
+    # Run summary
+    df_fold_summary = summarize_fold_consistency(imputed_folds, feature_names, target_name)
+
+    # Show first few rows
+    print(df_fold_summary.head())
+
+    # Optional: save to CSV
+    df_fold_summary.to_csv('fold_consistency_summary.csv', index=False)

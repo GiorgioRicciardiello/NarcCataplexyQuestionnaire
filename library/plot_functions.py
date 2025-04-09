@@ -8,6 +8,10 @@ import pathlib
 import matplotlib as mpl
 import textwrap
 from library.my_dcurves import my_plot_graphs
+from sklearn.calibration import calibration_curve
+from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
+from library.metrics_functions import compute_metrics
+import math
 
 
 def create_venn_diagram(
@@ -65,17 +69,19 @@ def create_venn_diagram(
         alpha=alpha,
         subset_label_formatter=lambda x: ''  # remove default counts
     )
-
+    font_lbl = 16
+    font_subset_lbl = 14
+    font_size_text = 14
     # 5. Increase the font size for the set labels
     for text in v.set_labels:
         if text:
-            text.set_fontsize(14)
+            text.set_fontsize(font_lbl)
 
     # 6. Increase the font size for the subset labels (the numeric counts)
     #    Since we removed them, this is optional
     for text in v.subset_labels:
         if text:
-            text.set_fontsize(12)
+            text.set_fontsize(font_subset_lbl)
 
     # 7. Manually place the feature names in each region
 
@@ -86,7 +92,7 @@ def create_venn_diagram(
         ax.text(
             pos_10[0], pos_10[1],
             "\n".join(sorted(only_config1)),
-            fontsize=10, ha='center', va='center', color='black'
+            fontsize=font_size_text, ha='center', va='center', color='black'
         )
 
     # Region unique to config2: label '01'
@@ -96,7 +102,7 @@ def create_venn_diagram(
         ax.text(
             pos_01[0], pos_01[1],
             "\n".join(sorted(only_config2)),
-            fontsize=10, ha='center', va='center', color='black'
+            fontsize=font_size_text, ha='center', va='center', color='black'
         )
 
     # Common region: label '11'
@@ -106,13 +112,15 @@ def create_venn_diagram(
         ax.text(
             pos_11[0], pos_11[1],
             "\n".join(sorted(common_features)),
-            fontsize=10, ha='center', va='center', color='black'
+            fontsize=font_size_text, ha='center', va='center', color='black'
         )
 
     # 8. Set plot title and layout
     plt.title(title, fontsize=16)
     plt.tight_layout()
-    plt.show()
+    plt.savefig("venn_diagram.png")
+    # plt.show()
+
 
 
 
@@ -564,3 +572,277 @@ def plot_dcurves_per_fold(df_results: pd.DataFrame, prevalence: float):
 
 
 
+
+
+
+def ppv_curve(sensitivity:float,
+              specificity:float,
+              prevalence_range:Optional[np.ndarray]=None,
+              feature_set:Optional[str]=None):
+    """
+    Plot the adjusted Positive Predictive Value (PPV) across a range of disease prevalence values
+    using Bayes' Theorem.
+
+    This function helps evaluate the real-world clinical utility of a classifier by showing how
+    PPV changes depending on the underlying prevalence of the condition (e.g., Narcolepsy Type 1).
+    The curve is plotted on a log-scale for prevalence to reflect population rarity.
+
+    Parameters:
+    ----------
+    sensitivity : float
+        Sensitivity (true positive rate) of the classifier.
+
+    specificity : float
+        Specificity (true negative rate) of the classifier.
+
+    prevalence_range : np.ndarray, optional
+        Array of prevalence values to evaluate PPV over (default: log-spaced from 1e-5 to 1e-2).
+
+    Returns:
+    -------
+    None
+        Displays a matplotlib plot of adjusted PPV vs. prevalence.
+
+    # Example: Elastic Net model (as per your results)
+    ppv_curve(sensitivity=0.98, specificity=0.99)
+    """
+    if prevalence_range is None:
+        prevalence_range = np.logspace(-5, -3, 100)
+    ppv = (sensitivity * prevalence_range) / (
+        (sensitivity * prevalence_range) + ((1 - specificity) * (1 - prevalence_range))
+    )
+
+    # Plotting
+    plt.figure(figsize=(8, 5))
+    plt.plot(prevalence_range, ppv, label=f'Sens={sensitivity:.2f}, Spec={specificity:.2f}')
+    plt.xscale('log')
+    plt.xlabel('Prevalence (log scale)')
+    plt.ylabel('Adjusted PPV')
+    if feature_set:
+        plt.title(f'Adjusted PPV Across Prevalence Ranges\n {feature_set}')
+    else:
+        plt.title('Adjusted PPV Across Prevalence Ranges')
+
+    plt.grid(True, which='both', ls='--', lw=0.5)
+    plt.axhline(0.5, color='gray', linestyle='--', linewidth=1, label='PPV = 0.5')
+    plt.axhline(0.2, color='red', linestyle='--', linewidth=1, label='PPV = 0.2')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_calibration(y_true, y_prob, n_bins=10):
+    """
+    sklearn.calibration.calibration_curve is a function in the scikit-learn library that computes true and predicted
+    probabilities for a calibration curve. A calibration curve is a plot that shows how well a binary classifier is
+    calibrated, i.e. how closely the predicted probabilities match the true outcomes. The function takes the true
+    labels and the predicted probabilities as inputs, and discretizes the :param y_true: :param y_prob: :param
+    n_bins:
+    :return: None
+    """
+    prob_true, prob_pred = calibration_curve(y_true, y_prob, n_bins=n_bins)
+    brier = brier_score_loss(y_true, y_prob)
+
+    plt.figure(figsize=(6, 6))
+    plt.plot(prob_pred, prob_true, marker='o', label='Model')
+    plt.plot([0, 1], [0, 1], linestyle='--', color='gray', label='Perfect calibration')
+    plt.xlabel('Predicted Probability')
+    plt.ylabel('Observed Frequency')
+    plt.title(f'Calibration Curve (Brier Score = {brier:.3f})')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+
+
+def multi_ppv_plot(df_avg_metrics:pd.DataFrame,
+                   model_name:str,
+                   rows:int=1,
+                   figsize:Optional[Tuple]=(12, 8),
+                   output_path:Optional[pathlib.Path]=None) -> None:
+    """
+    Fifure with subplots of the different PPV across all the feature sets of df_avg_metrics for a selected model
+    :param df_avg_metrics:
+    :param model_name:
+    :param rows:
+    :param figsize:
+    :param output_path:
+    :return:
+    """
+    fig, axs = plt.subplots(rows, math.ceil(len(df_avg_metrics['config'].unique()) / rows), figsize=figsize)
+    axs = axs.flatten()
+
+    for i, feature_set_ in enumerate(df_avg_metrics['config'].unique()):
+        mask = ((df_avg_metrics['config'] == feature_set_) & (df_avg_metrics['model'] == model_name))
+        df_ppv_curve = df_avg_metrics.loc[mask, ['sensitivity', 'specificity']]
+
+        if df_ppv_curve.empty:
+            continue
+
+        sensitivity = df_ppv_curve['sensitivity'].values[0]
+        specificity = df_ppv_curve['specificity'].values[0]
+        prevalence_range = np.logspace(-5, -3, 100)
+        ppv = (sensitivity * prevalence_range) / (
+            (sensitivity * prevalence_range) + ((1 - specificity) * (1 - prevalence_range))
+        )
+
+        axs[i].plot(prevalence_range, ppv, label=feature_set_)
+        axs[i].set_xscale('log')
+        axs[i].set_title(feature_set_, fontsize=10)
+        axs[i].axhline(0.2, linestyle='--', color='red', linewidth=1)
+        axs[i].axhline(0.5, linestyle='--', color='gray', linewidth=1)
+        axs[i].set_ylim(0, 1)
+        axs[i].grid(True, which='both', linestyle='--', linewidth=0.5)
+        axs[i].set_xlabel('Prevalence')
+        axs[i].set_ylabel('Adjusted PPV')
+
+    for j in range(i+1, len(axs)):
+        fig.delaxes(axs[j])
+
+    fig.tight_layout()
+    if output_path:
+        fig.savefig(output_path.joinpath('ppv_plot.png'), dpi=300)
+    plt.show()
+    plt.close(fig)
+
+def multi_ppv_plot_combined(df_predictions_model: pd.DataFrame,
+                            figsize: Optional[Tuple] = (8, 6),
+                            output_path: Optional[pathlib.Path] = None) -> None:
+    """
+    Single figure showing PPV curves across all feature sets for a selected model.
+    Each line represents a feature set, with adjusted PPV plotted against prevalence.
+
+    :param df_predictions_model: DataFrame with columns ['model_name', 'true_label', 'predicted_prob', 'prediction',
+       'fold_number', 'configuration']
+    :param figsize: Size of the matplotlib figure
+    :param output_path: Path to save the figure (filename 'ppv_plot_combined.png')
+    """
+    model_name = df_predictions_model.model_name.unique()[0]
+    fig, ax = plt.subplots(figsize=figsize)
+    prevalence_range = np.logspace(-5, -3, 100)
+    population_prevalence = 30 / 100000  # 0.0003
+
+    for feature_set_ in df_predictions_model['configuration'].unique():
+        ppvs_avg = np.zeros_like(prevalence_range)
+
+        fold_count = 0
+        for fold in df_predictions_model['fold_number'].unique():
+            mask = ((df_predictions_model['configuration'] == feature_set_) &
+                    (df_predictions_model['fold_number'] == fold))
+
+            if mask.sum() == 0:
+                continue
+
+            ppvs = []
+            for prev in prevalence_range:
+                metrics = compute_metrics(
+                    y_pred=df_predictions_model.loc[mask, 'prediction'],
+                    y_true=df_predictions_model.loc[mask, 'true_label'],
+                    prevalence=prev
+                )
+                ppvs.append(metrics.get('ppv', 0))
+
+            ppvs_avg += np.array(ppvs)
+            fold_count += 1
+
+        if fold_count > 0:
+            ppvs_avg /= fold_count
+            ax.plot(prevalence_range, ppvs_avg, label=feature_set_)
+
+    ax.axvline(population_prevalence, linestyle='--', color='blue', linewidth=1.5,
+               label='Population Prevalence (0.0003)')
+    ax.set_xscale('log')
+    ax.set_title(f'Adjusted PPV across prevalence levels ({model_name})')
+    ax.axhline(0.2, linestyle='--', color='red', linewidth=1, label='PPV = 0.2')
+    ax.axhline(0.5, linestyle='--', color='gray', linewidth=1, label='PPV = 0.5')
+    ax.set_ylim(0, 0.6)
+    ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+    ax.set_xlabel('Prevalence (log scale)')
+    ax.set_ylabel('Adjusted PPV')
+    ax.legend()
+    fig.tight_layout()
+
+    if output_path:
+        fig.savefig(output_path.joinpath('ppv_plot_combined.png'), dpi=300)
+
+    plt.show()
+    plt.close(fig)
+
+
+def multi_calibration_plot(df_predictions: pd.DataFrame,
+                           model_name: str,
+                           rows: int = 1,
+                           figsize: Optional[Tuple] = (12, 8),
+                           output_path: Optional[pathlib.Path] = None) -> pd.DataFrame:
+    """
+    Generates a single calibration plot figure with subplots for each fold.
+    Each subplot overlays calibration curves for all configurations (feature sets) for a given fold.
+    Also computes Brier Score, Log Loss, and AUC for each configuration/fold.
+
+    :param df_predictions: DataFrame with columns ['fold_number', 'true_label', 'predicted_prob', 'model_name', 'configuration']
+    :param model_name: Name of the model to filter on
+    :param rows: Number of subplot rows
+    :param figsize: Overall figure size
+    :param output_path: Directory to save the figure
+    :return: DataFrame with calibration metrics per fold and configuration
+    """
+    unique_folds = df_predictions['fold_number'].unique()
+    unique_configs = df_predictions['configuration'].unique()
+    fig, axs = plt.subplots(rows, math.ceil(len(unique_folds) / rows), figsize=figsize)
+    axs = axs.flatten()
+
+    color_map = plt.get_cmap('Set2')
+    config_colors = {config: color_map(i % 10) for i, config in enumerate(unique_configs)}
+    results = []
+
+    for i, fold_num in enumerate(unique_folds):
+        ax = axs[i]
+        for config in unique_configs:
+            mask = (
+                (df_predictions['fold_number'] == fold_num) &
+                (df_predictions['model_name'] == model_name) &
+                (df_predictions['configuration'] == config)
+            )
+            if not mask.any():
+                continue
+
+            y_true = df_predictions.loc[mask, 'true_label']
+            y_prob = df_predictions.loc[mask, 'predicted_prob']
+
+            prob_true, prob_pred = calibration_curve(y_true, y_prob, n_bins=10)
+            brier = brier_score_loss(y_true, y_prob)
+            logloss = log_loss(y_true, y_prob, labels=[0, 1])
+            auc = roc_auc_score(y_true, y_prob)
+
+            label = f'{config} (Brier={brier:.3f})'
+            ax.plot(prob_pred, prob_true, marker='o', label=label, color=config_colors[config])
+
+            results.append({
+                'fold_number': fold_num,
+                'configuration': config,
+                'brier_score': brier,
+                'log_loss': logloss,
+                'auc': auc
+            })
+
+        ax.plot([0, 1], [0, 1], linestyle='--', color='gray')
+        ax.set_title(f'Fold {fold_num}', fontsize=10)
+        ax.set_xlabel('Predicted Probability')
+        ax.set_ylabel('Observed Frequency')
+        ax.grid(True, linestyle='--', linewidth=0.5)
+
+    for j in range(i + 1, len(axs)):
+        fig.delaxes(axs[j])
+
+    # Shared legend
+    handles, labels = axs[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='upper center', ncol=2, fontsize='small', frameon=False)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if output_path:
+        fig.savefig(output_path.joinpath(f"calibration_plot_{model_name}_all_folds.png"), dpi=300)
+    plt.show()
+    plt.close(fig)
+
+    return pd.DataFrame(results)

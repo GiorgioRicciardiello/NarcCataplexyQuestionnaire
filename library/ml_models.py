@@ -4,7 +4,8 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 from typing import Optional, Dict, Tuple, List
-
+import joblib
+import os
 from pandas import DataFrame
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix
 from scipy.optimize import minimize_scalar
@@ -388,6 +389,22 @@ def compute_cross_validation(models:Dict[str, object],
         - classification results of each observation (TP, TN, FN, FP) with the labels and indexes from the source
     """
 
+    def save_imputed_folds(imputed_folds: list,
+                           save_path: str) -> None:
+        """
+        Saves each fold's imputed data to disk using joblib.
+
+        :param imputed_folds: List of dicts with train/val data and labels.
+        :param save_path: Directory where the folds will be saved.
+        """
+        save_path = pathlib.Path(save_path)
+        if not save_path.exists():
+            save_path.mkdir(parents=True, exist_ok=True)
+
+        for i, fold in enumerate(imputed_folds):
+            joblib.dump(fold, os.path.join(str(save_path), f"fold_{i}.joblib"))
+        print(f"Saved {len(imputed_folds)} folds to {save_path}")
+
     def data_imputation(data_split: pd.DataFrame,
                         verbose: bool = True) -> pd.DataFrame:
         """
@@ -488,6 +505,7 @@ def compute_cross_validation(models:Dict[str, object],
             'train_labels': train_labels,
             'val_labels': val_labels
         })
+    # save_imputed_folds(imputed_folds=imputed_folds, save_path=r'\NarcCataplexyQuestionnaire\data')
 
     # Aggregate metrics DataFrame
     metrics_records = []
@@ -628,23 +646,6 @@ def compute_cross_validation(models:Dict[str, object],
                     "fold_number": fold + 1  # Use fold+1 if you want fold numbering to start at 1
                 })
                 elastic_net_predictions_list.append(fold_df)
-
-            # EPI 219 ANALYSIS
-            # Prepare input dictionary
-            # models_dict = {
-            #     model_name: (val_labels, y_pred_prob[:, 1]),  # pass the positive class probabilities
-            # }
-            # Run decision curve analysis
-            # decision_curve_analysis(models_dict)
-            # calibration_curve(y_true=val_labels, y_prob=y_pred_prob[:, 1])
-            # CalibrationDisplay(y_true=val_labels, y_prob=y_pred_prob[:, 1])
-            #
-            # CalibrationDisplay.from_estimator(estimator=model, X=train_data, y=train_labels)
-            # likelihood_ratios = y_pred_prob[:, 1] / y_pred_prob[:, 0]
-            # brier_score = brier_score_loss(val_labels, y_pred_prob[:, 1])
-            # # calculate Uncertainty
-            # mean_outcome = np.mean(val_labels)
-            # uncertainty = mean_outcome * (1 - mean_outcome)
 
     df_classifications = pd.concat(classification_records)
     df_classifications = df_classifications.sort_values(by=['model_name', 'fold'])
@@ -891,3 +892,39 @@ def visualize_table(df: pd.DataFrame,
     print(tabulate(grouped_counts_before, headers='keys', tablefmt='grid'))
     print(f'Remaining Rows: {df_copy.shape[0]}')
     return grouped_counts_before
+
+
+def load_imputed_folds(save_path: str) -> list:
+    """
+    Loads all saved imputed folds from disk.
+
+    :param save_path: Directory where folds are stored.
+    :return: List of dicts for each fold.
+    """
+    fold_files = sorted(pathlib.Path(save_path).glob("fold_*.joblib"))
+    return [joblib.load(f) for f in fold_files]
+
+
+def summarize_fold_consistency(imputed_folds: list,
+                               feature_names: list,
+                               target_name: str) -> pd.DataFrame:
+    summaries = []
+
+    for fold_idx, fold in enumerate(imputed_folds):
+        for split in ['train', 'val']:
+            data = fold[f'{split}_data']
+            labels = fold[f'{split}_labels']
+
+            for feature in feature_names:
+                feature_vals = data[feature]
+                summaries.append({
+                    'fold': fold_idx,
+                    'split': split,
+                    'feature': feature,
+                    'num_positives': labels.sum(),
+                    'mean': feature_vals.mean(),
+                    'std': feature_vals.std(),
+                    'target_pos_rate': labels.mean()
+                })
+
+    return pd.DataFrame(summaries)
