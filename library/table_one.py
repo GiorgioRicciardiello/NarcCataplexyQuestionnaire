@@ -9,7 +9,7 @@ Year: 2024
 
 import numpy as np
 import pandas as pd
-from typing import Optional, Union
+from typing import Optional, Union, List
 from tabulate import tabulate
 import re
 class MakeTableOne:
@@ -213,56 +213,111 @@ class MakeTableOne:
     def _continuous_var_dist(frame: pd.DataFrame,
                              col: str,
                              decimal: Optional[int] = 2) -> str:
-        cell = f'{np.round(frame[col].mean(), decimal)} ({np.round(frame[col].std(), decimal)})'
+        # cell = (f'({frame[col].count()})\n'
+        #         f'{np.round(frame[col].mean(), decimal)}'
+        #         u'\u00B1'
+        #         f'{np.round(frame[col].std(), decimal)}')
+        cell = (f'{np.round(frame[col].mean(), decimal)}'
+                u'\u00B1'
+                f'{np.round(frame[col].std(), decimal)}'
+                f'({frame[col].count()})')
         return cell
 
     @staticmethod
-    def _categorical_var_dist(frame: pd.DataFrame,
-                              col: str,
-                              category: Optional[int] = None,
-                              decimal: Optional[int] = 2,
-                              ) -> Union[str, list]:
+    def _categorical_var_dist(
+            frame: pd.DataFrame,
+            col: str,
+            category: Optional[Union[int, str]] = None,
+            decimal: int = 2
+    ) -> Union[str, List[str]]:
         """
-        Count the number of occurrences in a column, giving he number of evens and the percentage. Used for category columns
+        Computes counts and percentages for categorical variables in a DataFrame column.
 
-        :param frame: dataframe from there to compute the count on the columns
-        :param col: column to compute the calculation of the count
-        :param category: if we want to count a specific category of the categories
-        :param decimal: decimal point to show in the table
-        :return:
+        Parameters:
+        - frame: DataFrame containing the data.
+        - col: Column name for which to compute stats.
+        - category: Optional specific category to report stats for.
+        - decimal: Number of decimal places for percentages.
+
+        Returns:
+        - A string (if category specified) or list of strings (for all categories),
+          formatted as: "count/valid_n (percent%) [missing=X]"
         """
+
+        total_n = frame.shape[0]
+        non_nan_series = frame[col].dropna()
+        non_nan_count = non_nan_series.shape[0]
+        missing = total_n - non_nan_count
+
         if category is not None:
-            count = frame.loc[frame[col] == category, col].shape[0]
-            non_nan_count = frame.loc[~frame[col].isna()].shape[0]  # use the non-nan count
-            if frame.shape[0] == 0:
-                return f'0'
+            count = (frame[col] == category).sum()
+            if non_nan_count > 0:
+                percent = np.round((count / non_nan_count) * 100, decimal)
+                # return f"({non_nan_count})\n {count}/{non_nan_count} ({percent}%)"
+                return f"{percent}%({non_nan_count})"
             else:
-                if non_nan_count > 0:
-                    cell = f'{count} ({np.round((count / non_nan_count) * 100, decimal)}%)'
-                else:
-                    cell = f'{count} (-%)'
-
-            return cell
+                # all values are nans
+                # return f"{count}/0 (-%) [missing={missing}]"
+                return f"-% ({count}/0)]"
         else:
-            # return the count ordered by the index
-            count = frame[col].value_counts()
-            count = count.sort_index()
-            non_nan_count = frame.loc[~frame[col].isna()].shape[0]  # use the non-nan count
+            counts = non_nan_series.value_counts().sort_index()
+            results = []
+            for level, count in counts.items():
+                percent = np.round((count / non_nan_count) * 100, decimal)
+                # results.append(f"{level}: {count}/{non_nan_count} ({percent}%) [missing={missing}]")
+                results.append(f"{level}: {percent}\%({non_nan_count})")
+            return results
 
-            if count.shape[0] == 1:
-                # binary data so counting the ones
-                if non_nan_count > 0:
-                    cell = f'{count[1]} ({np.round((count[1] / non_nan_count) * 100, decimal)}%)'
-                else:
-                    cell = f'{count} (0%)'
 
-                return cell
-            else:
-                if non_nan_count > 0:
-                    cell = [f'{count_} (0%)' for count_ in count]
-                else:
-                    cell = [f'{count_} (0%)' for count_ in count]
-                return cell
+    # def _categorical_var_dist(frame: pd.DataFrame,
+    #                           col: str,
+    #                           category: Optional[int] = None,
+    #                           decimal: Optional[int] = 2,
+    #                           ) -> Union[str, list]:
+    #     """
+    #     Count the number of occurrences in a column, giving he number of evens and the percentage. Used for category columns
+    #
+    #     :param frame: dataframe from there to compute the count on the columns
+    #     :param col: column to compute the calculation of the count
+    #     :param category: if we want to count a specific category of the categories
+    #     :param decimal: decimal point to show in the table
+    #     :return:
+    #     """
+    #     if category is not None:
+    #         count = frame.loc[frame[col] == category, col].shape[0]
+    #         non_nan_count = frame[col].count()  # frame.loc[~frame[col].isna()].shape[0]  # use the non-nan count
+    #         if frame.shape[0] == 0:
+    #             return f'0'
+    #         else:
+    #             if non_nan_count > 0:
+    #                 cell = (f'{count}/{non_nan_count}'
+    #                         f'({np.round((count / non_nan_count) * 100, decimal)}%)')
+    #             else:
+    #                 cell = f'{count} (-%)'
+    #
+    #         return cell
+    #     else:
+    #         # return the count ordered by the index
+    #         count = frame[col].value_counts()
+    #         count = count.sort_index()
+    #         non_nan_count = frame.loc[~frame[col].isna()].shape[0]  # use the non-nan count
+    #
+    #         if count.shape[0] == 1:
+    #             # binary data so counting the ones
+    #             if non_nan_count > 0:
+    #                 cell = (f'{count[1]} '
+    #                         f'({np.round((count[1] / non_nan_count) * 100, decimal)}%)'
+    #                         f'{[non_nan_count]}')
+    #             else:
+    #                 cell = f'{count} (0%)'
+    #
+    #             return cell
+    #         else:
+    #             if non_nan_count > 0:
+    #                 cell = [f'{count_} (0%) {[non_nan_count]}' for count_ in count]
+    #             else:
+    #                 cell = [f'{count_} (0%) {[count]}' for count_ in count]
+    #             return cell
 
     def remove_reference_categories(self):
         """

@@ -513,8 +513,8 @@ def compute_cross_validation(models:Dict[str, object],
     elastic_net_coefs_list = []
     elastic_net_predictions_list = []  # store elastic net predicted prob for net benefit curves
     for model_name, model in models.items():
-        # model_name = "Elastic Net"
-        # model = models.get(model_name)
+        model_name = "Elastic Net"
+        model = models.get(model_name)
         for fold, fold_data in enumerate(imputed_folds):
             train_data = fold_data.get('train_data').copy()
             val_data = fold_data.get('val_data').copy()

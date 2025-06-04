@@ -119,7 +119,7 @@ def create_venn_diagram(
     plt.title(title, fontsize=16)
     plt.tight_layout()
     plt.savefig("venn_diagram.png")
-    # plt.show()
+    plt.show()
 
 
 
@@ -267,6 +267,7 @@ def plot_model_metrics_specific_columns(df: pd.DataFrame,
         )
         # Set labels
         ax.set_ylabel(col.upper())
+        ax.grid(False)
         if i == n_rows - 1:  # Only set xlabel for the bottom plot
             ax.set_xlabel("Configuration")
         else:
@@ -281,7 +282,7 @@ def plot_model_metrics_specific_columns(df: pd.DataFrame,
                          fmt='%.2f',
                          padding=3,
                          fontweight='bold',
-                         fontsize=8)
+                         fontsize=12)
 
     # Create a single shared legend at the top of the first figure
     handles, labels = axes[0].get_legend_handles_labels()  # Get legend info from first plot
@@ -389,9 +390,6 @@ def plot_elastic_net_model_coefficients(df_params: pd.DataFrame,
     fig.supxlabel("Mean Absolute Coefficient", fontsize=12)
     fig.supylabel("Feature", fontsize=12)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
-    plt.show()
-
-    # Optionally save the figure
     if output_path:
         plt.savefig(output_path / 'elastic_net_model_coefficients.png', dpi=300)
     plt.show()
@@ -480,7 +478,10 @@ def prepare_net_benefit_df(
     return plot_df
 
 
-def plot_dcurves_per_fold(df_results: pd.DataFrame, prevalence: float):
+def plot_dcurves_per_fold(df_results: pd.DataFrame,
+                          prevalence: float,
+                          configuration:str='questionnaire',
+                          output_path:Optional[pathlib.Path]=None) -> None:
     """
     Plots decision curves for each validation fold, displaying net benefit curves along with
     the sample sizes (total, cases, and controls) in each fold.
@@ -535,11 +536,12 @@ def plot_dcurves_per_fold(df_results: pd.DataFrame, prevalence: float):
     else:
         axes = [axes]
 
+    config_file_name  = df_results.loc[df_results['configuration_formal'] == configuration, 'configuration'].unique()[0]
     # --- Plot for each fold ---
     for ax, fold in zip(axes, unique_folds):
         # Filter data for the current fold
-        fold_data = df_results.loc[df_results['fold_number'] == fold]
-
+        fold_data = df_results.loc[(df_results['fold_number'] == fold) &
+                                   (df_results['configuration_formal'] == configuration)]
         # Count the number of samples, cases, and controls
         num_total = len(fold_data)
         # Assumes that a column "true_label" exists and that 1 indicates a case.
@@ -561,13 +563,15 @@ def plot_dcurves_per_fold(df_results: pd.DataFrame, prevalence: float):
         )
 
         # Set the subplot title with fold, total samples, cases, and controls
-        ax.set_title(f"Fold {fold}\nTotal: {num_total}, Cases: {cases}, Controls: {controls}")
+        ax.set_title(f"Fold {fold}\n{configuration}\nTotal: {num_total}, Cases: {cases}, Controls: {controls}")
 
     # If there are extra axes (when the grid is larger than the number of folds), hide them.
     for extra_ax in axes[len(unique_folds):]:
         extra_ax.axis('off')
 
     plt.tight_layout()
+    if output_path:
+        plt.savefig(output_path.joinpath(f'net_benefit_curves_{config_file_name}.png'), dpi=300)
     plt.show()
 
 
@@ -708,6 +712,7 @@ def multi_ppv_plot(df_avg_metrics:pd.DataFrame,
 
 def multi_ppv_plot_combined(df_predictions_model: pd.DataFrame,
                             figsize: Optional[Tuple] = (8, 6),
+                            population_prevalence:float=0.0003,
                             output_path: Optional[pathlib.Path] = None) -> None:
     """
     Single figure showing PPV curves across all feature sets for a selected model.
@@ -721,7 +726,6 @@ def multi_ppv_plot_combined(df_predictions_model: pd.DataFrame,
     model_name = df_predictions_model.model_name.unique()[0]
     fig, ax = plt.subplots(figsize=figsize)
     prevalence_range = np.logspace(-5, -3, 100)
-    population_prevalence = 30 / 100000  # 0.0003
 
     for feature_set_ in df_predictions_model['configuration'].unique():
         ppvs_avg = np.zeros_like(prevalence_range)

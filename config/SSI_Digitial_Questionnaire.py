@@ -414,7 +414,7 @@ variable_definitions = {
     "STRESSED": "Stressed",
     "SURPRISED": "Surprised",
     "TENSE": "Tense",
-    "sex": "Gender of the patient",
+    "sex": "Gender (Male)",
     "ONSET": "Muscle weakness age onset",
     "DURATION": "Muscle weakness duration",
     "SP": "Sleep paralysis",
@@ -431,5 +431,20 @@ variable_definitions = {
     "HEAD": "Muscle weakness head and shoulder dropping",
     "JAW": "Muscle weakness jaw sagging",
     "KNEES": "Muscle weakness legs and knees",
+
+
+    'Race': 'Race',
+    'AGE': 'Age',
+    'BMI': 'BMI',
+
+    'ESS': 'ESS Score',
+
+    'HALLUC': 'Hallucinations',
+    'HHONSET':'Hallucinations Age Onset',
+
+    'NAPS': 'Naps',
+    'MSLT':' MSLT',
+    'MSLTAGE':'MSLT Age',
+    'SOREMP': 'Sleep-Onset Rapid Eye Movement Period',
 
 }

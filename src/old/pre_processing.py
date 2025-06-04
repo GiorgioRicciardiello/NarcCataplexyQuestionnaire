@@ -5,9 +5,6 @@ Two data sources are used the pre-processing. The sources must be merged into a 
 2. Pre-process the SSQ dataset
 3. Merge the two datasets
 
-This updated scripts uses the created ICSD criteria for NT1 and NT2 directy from the dataset
-
-
 Columns must be homogenized
 """
 import pathlib
@@ -26,50 +23,89 @@ from sklearn.impute import IterativeImputer
 from sklearn.linear_model import BayesianRidge
 
 
-def visualize_table(df: pd.DataFrame, group_by: List[str]) -> pd.DataFrame:
+def visualize_table(df: pd.DataFrame,
+                    group_by: List[str]) -> pd.DataFrame:
     """
-    Count the unique pair combinations in a dataframe within the grouped by columns.
-    :param df: Input DataFrame
-    :param group_by: List of column names to group by
-    :return: DataFrame showing counts of unique combinations
+    Count the unique pair combinations ina dataframe within the grouped by columns
+    :param df:
+    :param group_by:
+    :return:
     """
     df_copy = df.copy()
     print("Distribution before modification:")
-
-    # Only fill NaN with 'NaN' in object (string) columns to avoid dtype issues
-    df_plot_before = df_copy.copy()
-    for col in df_plot_before.select_dtypes(include='object'):
-        df_plot_before[col] = df_plot_before[col].fillna('NaN')
-
-    grouped_counts_before = df_plot_before.groupby(group_by).size().reset_index(name='Counts')
-
+    df_plot_before = df_copy.fillna('NaN')
+    grouped_counts_before = df_plot_before.groupby(group_by).size().reset_index(
+        name='Counts')
     print(tabulate(grouped_counts_before, headers='keys', tablefmt='grid'))
     print(f'Remaining Rows: {df_copy.shape[0]}')
     return grouped_counts_before
 
-#%% Functions for the okun dataset
-def pre_process_okun_dataset(dataset_path:pathlib.Path) -> pd.DataFrame:
+#%% Functions for the ssqdx dataset
+def pre_process_ssqdx_dataset(dataset_path:pathlib.Path) -> pd.DataFrame:
     """
     Pre-process of the SSQDX dataset.
     :param dataset_path:
     :return:
     """
 
-    df_okun = pd.read_excel(dataset_path)
-    tab = visualize_table(df=df_okun,
-                          group_by=['DQB1*0602', 'NT1 ICSD3 - TR'])
+    def contains_a_to_f(row) -> bool:
+        if 'control' in row['Dx']:
+            return False
+        if pd.isnull(row['Dx']):
+            return False
+        if 'NT1' in row['Dx']:
+            return True
+        if pd.Series(row['Dx']).str.contains(r'[A-F]', case=False, na=False).any():
+            return True
+        return False
 
+    def set_narcolepsy(row) -> str:
+        """
+        Set the Narcolepsy diagnosis based on the columns DX and DQB10602.
+
+        Diagnosis criteria:
+        · 98% sure of Narcolepsy if:
+            - DX (1) contains letters A, B, C, or F
+            - DQB10602 = 1
+        · Factual Narcolepsy if:
+            - DX (1) contains letters A, B, C, or F
+            - DQB10602 = 0
+        · No Narcolepsy otherwise
+
+        Parameters:
+        -----------
+        row : pd.Series
+            A row from the DataFrame containing 'DQB10602' and 'contains_A_to_F' columns.
+
+        Returns:
+        --------
+        str
+            The narcolepsy diagnosis as a string.
+        """
+        # Check for missing values in relevant columns
+        if pd.isna(row['DQB10602']) or pd.isna(row['contains_A_to_F']):
+            return 'undefined'
+        # Diagnosis logic based on DQB10602 and contains_A_to_F criteria
+        if row['DQB10602'] == 1 and row['contains_A_to_F']:
+            return 'narcolepsy'
+        elif row['DQB10602'] == 0 and row['contains_A_to_F']:
+            return 'factual narcolepsy'
+        else:
+            return 'non-narcolepsy'
+
+    df_ssqdx = pd.read_excel(dataset_path)
     # %% Work on the dx dataset
-    df_okun.replace(to_replace='.', value=np.nan, inplace=True)
-    df_okun.rename(columns={'# NAPS': 'NAPS',
+    df_ssqdx.replace(to_replace='.', value=np.nan, inplace=True)
+    df_ssqdx.rename(columns={'# NAPS': 'NAPS',
                              'DQB1*0602': 'DQB10602'}, inplace=True)
-    df_okun['source'] = 'okun'
-    df_okun['sex'] = df_okun['sex'].map({'F': 0, 'M': 1})
-    df_okun['BMI'] = df_okun['BMI'].round(1)
+    df_ssqdx['source'] = 'dx'
+    df_ssqdx['sex'] = df_ssqdx['sex'].map({'F': 0, 'M': 1})
+    df_ssqdx['BMI'] = df_ssqdx['BMI'].round(1)
 
+    df_ssqdx['Dx'] = df_ssqdx['Dx'].astype(str)
+    df_ssqdx['contains_A_to_F'] = df_ssqdx.apply(contains_a_to_f, axis=1)
+    df_ssqdx['narcolepsy'] = df_ssqdx.apply(set_narcolepsy, axis=1)
     # %% rename columns
-    # SSI_Digital_Questionnaire, these columns are of muscle weakness that we do not use
-    # eg., dreaming, sleeping, bladder controsl, fainting, fall prevention,
     mapper_q = [
         'Q:86',
         'Q:87',
@@ -85,51 +121,12 @@ def pre_process_okun_dataset(dataset_path:pathlib.Path) -> pd.DataFrame:
         'Q:137',
         'Q:140'
     ]
-    df_okun.drop(columns=mapper_q, inplace=True)
+    df_ssqdx.drop(columns=mapper_q, inplace=True)
+    tab = visualize_table(df=df_ssqdx,
+                          group_by=['source', 'narcolepsy', 'contains_A_to_F', 'DQB10602'])
+    return df_ssqdx
 
-    df_okun['NT1 ICSD3 - TR'] = df_okun['NT1 ICSD3 - TR'].replace({'not meeting criteria': 'not meet criteria'})
-    df_okun['NT2 ICSD3 - TR'] = df_okun['NT2 ICSD3 - TR'].replace({'not meeting criteria': 'not meet criteria'})
-
-    tab = visualize_table(df=df_okun,
-                          group_by=['source', 'DQB10602', 'NT1 ICSD3 - TR', 'NT2 ICSD3 - TR'])
-    tab.to_csv('tab_okun_target_raw.csv', index=False)
-
-    df_okun = df_okun.drop(columns=[
-        'Referral',
-        'Recruit',
-        'Dx3',
-        'Dx',
-        # 'MSLT (<=8)',
-        # 'SOREMP (>=2)',
-        # 'MSLTAGE',
-        # 'SE',
-        # 'REMLAT (< 15)',
-    ])
-    df_okun.rename(mapper={
-
-    })
-    # df_okun.columns = map(str.lower, df_okun.columns)
-    df_okun = df_okun.rename(columns={'SEX2': 'SEX',
-                                      'MSLT (<=8)': 'MSLT',
-                                      'SOREMP (>=2)': 'SOREMP',
-                                      'MSLTAGE': 'MSLTAGE',
-                                      'SE': 'SE',
-                                      'REMLAT (< 15)': 'REMLAT'}
-                             )
-
-    df_okun[target] = df_okun[target].replace({'no data': np.nan,
-                                                'control': 0,
-                                               '1': 1,
-                                               '0': 0})
-
-    df_okun[target_nt2] = df_okun[target_nt2].replace({'no data': np.nan,
-                                                'control': 0,
-                                               '1': 1,
-                                               '0': 0})
-
-    return df_okun
-
-def pre_process_anic_dataset(dataset_path: pathlib.Path) -> pd.DataFrame:
+def pre_process_ssq_dataset(dataset_path: pathlib.Path) -> pd.DataFrame:
     """
 
     :param dataset_path:
@@ -183,11 +180,11 @@ def pre_process_anic_dataset(dataset_path: pathlib.Path) -> pd.DataFrame:
         """Function to check if a column contains any string or datetime values"""
         return series.apply(lambda x: isinstance(x, (str, pd.Timestamp))).any()
 
-    df_anic = pd.read_excel(dataset_path)
+    df_ssq = pd.read_excel(dataset_path)
 
     #  rename columns and drop unwanted
-    df_anic.drop(columns=['Name'], inplace=True)
-    df_anic.rename(columns={"Pt's Last Name": 'name_last',
+    df_ssq.drop(columns=['Name'], inplace=True)
+    df_ssq.rename(columns={"Pt's Last Name": 'name_last',
                            'Full name (Last, First)': 'name',
                            "Pt's First Name": 'name_first',
                            "DOB": "date_of_birth",
@@ -206,160 +203,125 @@ def pre_process_anic_dataset(dataset_path: pathlib.Path) -> pd.DataFrame:
                            },
                   inplace=True)
     #  PHI formatting
-    df_anic['name'] = df_anic['name_first'] + ' ' + df_anic['name_last']
-    df_anic = df_anic.drop(columns=['name_first', 'name_last'])
-    df_anic['gender'] = df_anic['gender'].replace({'M': 1, 'F': 0})
-    df_anic['gender'] = df_anic['gender'].astype(int)
-    df_anic['place_birth'] = df_anic['place_birth'].str.lstrip()  # .replace(' ', '')
-    df_anic['place_birth'] = df_anic['place_birth'].str.strip()  # .replace(' ', '')
+    df_ssq['name'] = df_ssq['name_first'] + ' ' + df_ssq['name_last']
+    df_ssq.drop(columns=['name_first', 'name_last'], inplace=True)
+    df_ssq['gender'].replace({'M': 1, 'F': 0}, inplace=True)
+    df_ssq['gender'] = df_ssq['gender'].astype(int)
+    df_ssq['place_birth'] = df_ssq['place_birth'].str.lstrip()  # .replace(' ', '')
+    df_ssq['place_birth'] = df_ssq['place_birth'].str.strip()  # .replace(' ', '')
     # %% errors
-    df_anic.replace('????', np.nan, inplace=True)
-    df_anic['97'] = df_anic['97'].replace({'19-30': 19.5})
-    df_anic['95'] = df_anic['95'].replace({'18-25': 18.15})
-    df_anic['46'] = df_anic['46'].replace({'late30s-ear40s': 35,
-                        '16-26': 23})
-    df_anic.loc[df_anic['65a'] == '2,1', '65a'] = 1
-    df_anic['65a'] = df_anic['65a'].astype(int)
-    # df_anic['83a'].astype(int)
-    index_to_drop = df_anic.loc[(df_anic['54b'] == '0 ?') | (df_anic['54b'] == 9)].index
-    df_anic.drop(index=index_to_drop, inplace=True)
+    df_ssq.replace('????', np.nan, inplace=True)
+    df_ssq[97].replace({'19-30': 19.5}, inplace=True)
+    df_ssq[95].replace({'18-25': 18.15}, inplace=True)
+    df_ssq[46].replace({'late30s-ear40s': 35,
+                        '16-26': 23}, inplace=True)
+    df_ssq.loc[df_ssq['65a'] == '2,1', '65a'] = 1
+    df_ssq['65a'] = df_ssq['65a'].astype(int)
+    # df_ssq['83a'].astype(int)
+    index_to_drop = df_ssq.loc[(df_ssq['54b'] == '0 ?') | (df_ssq['54b'] == 9)].index
+    df_ssq.drop(index=index_to_drop, inplace=True)
     # there is an extra zero in:
-    df_anic.loc[956, '60b'] = '000009'  # before was 0000090'. Results extra column full of None in the next code block
-    df_anic.loc[740, '64b'] = '900000'  # before " '900000"
-    df_anic.loc[933, '72b'] = '011000'  # before '0110000'
+    df_ssq.loc[956, '60b'] = '000009'  # before was 0000090'. Results extra column full of None in the next code block
+    df_ssq.loc[740, '64b'] = '900000'  # before " '900000"
+    df_ssq.loc[933, '72b'] = '011000'  # before '0110000'
 
     # sparse the dataset - Emotions and muscle weakness
     # Note: The new columns indexes make reference to the dictionary mw_experiences in the config folder
     # Select columns that match the pattern using regular expression
     pattern = r'^\d+[ab]$'
-    col_emot_mw = df_anic.filter(regex=pattern).columns
+    col_emot_mw = df_ssq.filter(regex=pattern).columns
     col_emot_mw_multi_response = [col for col in col_emot_mw if
-                                  df_anic[col].apply(lambda x: isinstance(x, str)).any()]
+                                  df_ssq[col].apply(lambda x: isinstance(x, str)).any()]
     col_emot_mw_multi_response = [col for col in col_emot_mw_multi_response if col.endswith('b')]
     col_emot_mw_multi_response = [col for col in col_emot_mw_multi_response if
                                   ast.literal_eval(col.split('b')[0]) < 80]
     # remove the ' symbol that not all cells have
-    df_anic[col_emot_mw_multi_response] = df_anic[col_emot_mw_multi_response].replace("'", '', regex=True)
+    df_ssq[col_emot_mw_multi_response] = df_ssq[col_emot_mw_multi_response].replace("'", '', regex=True)
     # all same format
-    df_anic[col_emot_mw_multi_response] = df_anic[col_emot_mw_multi_response].astype(str)
+    df_ssq[col_emot_mw_multi_response] = df_ssq[col_emot_mw_multi_response].astype(str)
     # expand the cells and insert the slice of the new frame
     for col in col_emot_mw_multi_response:
-        df_tmp = expand_series(series=df_anic[col], col_name=col)
-        column_index = df_anic.columns.get_loc(col)
+        df_tmp = expand_series(series=df_ssq[col], col_name=col)
+        column_index = df_ssq.columns.get_loc(col)
         # squezze in the middle the new columns
-        df_anic = pd.concat([df_anic.iloc[:, :column_index], df_tmp, df_anic.iloc[:, column_index + 1:]], axis=1)
+        df_ssq = pd.concat([df_ssq.iloc[:, :column_index], df_tmp, df_ssq.iloc[:, column_index + 1:]], axis=1)
     # set as integer the leading columns that indicate that yes/ no response
     pattern = r'^\d+[a]$'
-    col_emot_mw_yn = df_anic.filter(regex=pattern).columns
+    col_emot_mw_yn = df_ssq.filter(regex=pattern).columns
     col_emot_mw_yn = [col for col in col_emot_mw_yn if ast.literal_eval(col.split('a')[0]) < 80]
-    df_anic[col_emot_mw_yn] = df_anic[col_emot_mw_yn].astype(int)
+    df_ssq[col_emot_mw_yn] = df_ssq[col_emot_mw_yn].astype(int)
 
     # # re-order the columns
-    # columns = ['name'] + [col for col in df_anic.columns if col != 'name']
-    # df_anic = df_anic[columns]
-    # df_anic.reset_index(drop=True, inplace=True)
+    # columns = ['name'] + [col for col in df_ssq.columns if col != 'name']
+    # df_ssq = df_ssq[columns]
+    # df_ssq.reset_index(drop=True, inplace=True)
 
     # data type formatting
     col_unwanted = ['102a', '102b', '103a', '103b',
                     '103c', '103d', '103e', '103f',
                     '103g', '103h', '103i', '103j']
-    df_anic.drop(columns=col_unwanted, inplace=True)
-
-    col_keep_format = ["PtKey",
-                        "name",
-                        "to DB file order",
-                        "DbID",
-                        "ID1",
-                        "Alternate Name",
-                        "GWAS ID",
-                        "date_of_birth",
-                        "age",
-                        "gender",
-                        "place_birth",
-                        "bmi",
-                        "ethnicity",
-                        "completed",
-                        "CSF Hcrt concentration crude (1)",
-                        "Dx (1)",
-                        "MSLT MSL (1)",
-                        "MSLT #SOREM (1)",
-                        "DQB1*0602",
-                        "DQB1*0602 Typing Date",
-                        "NT2 ICSD3 - TR",
-                        "NT1 ICSD3 - TR",
-                        "cataplexy_clear_cut",
-                        "possibility",
-                        "C. Narcolepsy - NOT RELIABLE",
-                        "d_other_sleep_disorder",
-                        "d_one",
-                        "d_two",
-                        "d_three",]
-
-    for col in df_anic.columns:
-        if col in col_keep_format:
-            continue
+    df_ssq.drop(columns=col_unwanted, inplace=True)
+    for col in df_ssq.columns[14::]:
         # print(col)
-        df_anic[col] = df_anic[col].apply(remove_non_numeric)
-    df_anic.replace('', np.nan, inplace=True)
+        df_ssq[col] = df_ssq[col].apply(remove_non_numeric)
+    df_ssq.replace('', np.nan, inplace=True)
 
-    for col in df_anic.columns:
-        if col in col_keep_format:
-            continue
+    for col in df_ssq.columns[14::]:
         # print(col)
-        df_anic[col] = df_anic[col].apply(string_to_numeric)
-    df_anic = df_anic.round(2)
+        df_ssq[col] = df_ssq[col].apply(string_to_numeric)
+    df_ssq = df_ssq.round(2)
 
     # convert as integers the columns
     # Get list of columns that do not contain any NaN values and do not have any string or datetime values
-    columns_without_nan = [col for col in df_anic.columns if
-                           not df_anic[col].isna().any() and not contains_string_or_datetime(df_anic[col])]
+    columns_without_nan = [col for col in df_ssq.columns if
+                           not df_ssq[col].isna().any() and not contains_string_or_datetime(df_ssq[col])]
 
-    df_anic[columns_without_nan] = df_anic[columns_without_nan].astype(int)
+    df_ssq[columns_without_nan] = df_ssq[columns_without_nan].astype(int)
 
     # rename all columns as strings
     pattern = r'^\d.*[a-zA-Z]$'  # string starts with a number and ends with any letter
     compiled_pattern = re.compile(pattern)
-    columns = [col if isinstance(col, str) else str(col) for col in df_anic.columns]
-    df_anic.columns = columns
+    columns = [col if isinstance(col, str) else str(col) for col in df_ssq.columns]
+    df_ssq.columns = columns
 
-    for col in df_anic.columns:
+    for col in df_ssq.columns:
         if is_integer(col):
             col_int = int(col)
             if col_int in key_mapping.keys():
-                df_anic.rename(columns={col: f'{col}_{key_mapping[col_int]}'}, inplace=True)
-        if isinstance(col, str) and col in df_anic.columns:
+                df_ssq.rename(columns={col: f'{col}_{key_mapping[col_int]}'}, inplace=True)
+        if isinstance(col, str) and col in df_ssq.columns:
             # check if the string starts with a number and ends with any letter
             if compiled_pattern.match(col):
                 num_col = col[0:2]
                 ramification = col[2]
-                columns_starting_with_num_col = [col for col in df_anic.columns if str(col).startswith(num_col)]
+                columns_starting_with_num_col = [col for col in df_ssq.columns if str(col).startswith(num_col)]
                 new_col_pattern = {col: f'{col}_{key_mapping[int(num_col)].replace("_", "-")}' for col in
                                    columns_starting_with_num_col}
-                df_anic.rename(mapper=new_col_pattern, inplace=True, axis=1)
+                df_ssq.rename(mapper=new_col_pattern, inplace=True, axis=1)
 
+    df_ssq['narcolepsy'] = df_ssq['narcolepsy'].astype(int)
     # Convert the 'epworth' columns to integers, ignoring NaNs
-    ess_columns = df_anic.columns.str.contains('epworth')
-    df_anic.loc[:, ess_columns] = df_anic.loc[:, ess_columns].astype(float)
-    df_anic.loc[:, ess_columns] = df_anic.loc[:, ess_columns].replace([9, 8], np.nan)
+    ess_columns = df_ssq.columns.str.contains('epworth')
+    df_ssq.loc[:, ess_columns] = df_ssq.loc[:, ess_columns].astype(float)
+    df_ssq.loc[:, ess_columns] = df_ssq.loc[:, ess_columns].replace([9, 8], np.nan)
 
-    for val in df_anic.loc[:, df_anic.columns.str.contains('epworth')].columns:
-        print(f'{val}: {df_anic[val].value_counts().to_dict()}')
-        print(f'\t\t max:{max(df_anic[val].value_counts().to_dict().keys())}')
+    for val in df_ssq.loc[:, df_ssq.columns.str.contains('epworth')].columns:
+        print(f'{val}: {df_ssq[val].value_counts().to_dict()}')
+        print(f'\t\t max:{max(df_ssq[val].value_counts().to_dict().keys())}')
 
     # ignore numbers that are used to mark missinges
-    df_anic['epworth_score'] = df_anic.loc[:, df_anic.columns.str.contains('epworth')].sum(skipna=True, axis=1)
+    df_ssq['epworth_score'] = df_ssq.loc[:, df_ssq.columns.str.contains('epworth')].sum(skipna=True, axis=1)
 
-    print(f'Distribution ESS Score: \n {df_anic["epworth_score"].describe()}')
+    print(f'Distribution ESS Score: \n {df_ssq["epworth_score"].describe()}')
 
-    df_anic.columns = map(str.lower, df_anic.columns)
-    df_anic['bmi'] = pd.to_numeric(df_anic['bmi'], errors='coerce').round(1)
-    df_anic['age'] = pd.to_numeric(df_anic['age'], errors='coerce').round(0)
+    df_ssq.columns = map(str.lower, df_ssq.columns)
+    df_ssq['bmi'] = pd.to_numeric(df_ssq['bmi'], errors='coerce').round(1)
+    df_ssq['age'] = pd.to_numeric(df_ssq['age'], errors='coerce').round(0)
 
     # drop unnamed columns
-    df_anic = df_anic.drop(columns=df_anic.filter(regex='^unnamed:').columns)
-    df_anic['source'] =  'anic'
+    df_ssq = df_ssq.drop(columns=df_ssq.filter(regex='^unnamed:').columns)
+
     col_first = [
-        'source',
         'ptkey',
         'gwas id',
         'name',
@@ -370,69 +332,33 @@ def pre_process_anic_dataset(dataset_path: pathlib.Path) -> pd.DataFrame:
         'place_birth',
         'csf hcrt concentration crude (1)',
         'ethnicity',
-        # 'completed',
+        'completed',
         'dqb1*0602',
-        # 'dqb1*0602 typing date',
-        # 'cataplexy_clear_cut',
-        # 'possibility',
-        # 'narcolepsy',
-        'nt1 icsd3 - tr',
-        'nt2 icsd3 - tr'
-    ]
-    col_rest = [col for col in df_anic.columns if col not in col_first]
-    cols = col_first + col_rest
-    # assert len(cols) == df_anic.shape[1]
-    df_anic = df_anic[cols]
-    df_anic.reset_index(drop=True, inplace=True)
-    df_anic = df_anic.drop(columns=[
-        'csf hcrt concentration crude (1)',
-        'dx (1)',
-        # 'mslt #sorem (1)',  # sorem (1)
+        'dqb1*0602 typing date',
         'cataplexy_clear_cut',
         'possibility',
-        'c. narcolepsy - not reliable'
-    ])
+        'narcolepsy',
+    ]
+    col_rest = [col for col in df_ssq.columns if col not in col_first]
+    cols = col_first + col_rest
+    assert len(cols) == df_ssq.shape[1]
+    df_ssq = df_ssq[cols]
+    df_ssq.reset_index(drop=True, inplace=True)
 
-    df_anic.rename(columns={
+    df_ssq.rename(columns={
         'dqb1*0602': 'DQB10602',
-        'nt1 icsd3 - tr': 'NT1 ICSD3 - TR',
-        'nt2 icsd3 - tr': 'NT2 ICSD3 - TR',
-        'mslt msl (1)': 'MSLT',
-        'mslt #sorem (1)': 'SOREMP',
-        # 'dqb1*0602 typing date': 'DQB10602 date',
+        'dqb1*0602 typing date': 'DQB10602 date',
     }, inplace=True)
 
-    df_anic[target] = df_anic[target].replace({'no data': np.nan,
-                                                'control': 0,
-                                               '1': 1,
-                                               '0': 0})
-
-    df_anic[target_nt2] = df_anic[target_nt2].replace({'no data': np.nan,
-                                                'control': 0,
-                                               '1': 1,
-                                               '0': 0})
-    # SOREMP reported as 4 of 5, 2 of 3, ... parsed to the fist integer
-    # df_anic['SOREMP'] = df_anic['SOREMP'].str.extract(r'(\d+)').astype(float)
-
-    df_anic = df_anic.loc[~df_anic[target].isna(), :]
-
-    tab = visualize_table(df=df_anic,
-                          group_by=['source', 'DQB10602', 'NT1 ICSD3 - TR', 'NT2 ICSD3 - TR'])
-    tab.to_csv('tab_df_anic_target_raw.csv', index=False)
-
-
     # check the unique values per columns
-    # for col in df_anic.columns:
-    #     print(col)
-    #     if df_anic[col].nunique() > 10 or col == 'ethnicity':
-    #         continue
-    #     if col in ['NT2 ICSD3 - TR', 'NT1 ICSD3 - TR', 'mslt']:
-    #         continue
-    #     value_counts = df_anic[col].value_counts().to_dict()
-    #     value_counts = dict(sorted(value_counts.items()))  # Sort the dictionary by key
-    #     print(f'{col}: \n\t{value_counts}')
+    for col in df_ssq.columns:
+        if df_ssq[col].nunique() > 10 or col == 'ethnicity':
+            continue
+        value_counts = df_ssq[col].value_counts().to_dict()
+        value_counts = dict(sorted(value_counts.items()))  # Sort the dictionary by key
+        print(f'{col}: \n\t{value_counts}')
 
-    return df_anic
+    return df_ssq
 
 
 # %% Functions for merging
@@ -722,19 +648,16 @@ def compare_imputation(df_original:pd.DataFrame,
 # %% Main
 if __name__ == "__main__":
     PLOT = False
-    target = 'NT1 ICSD3 - TR'
-    target_nt2 = target.replace('1', '2')
     # %% Pre-process SSQDX dataset
-    df_okun = pre_process_okun_dataset(dataset_path=config.get('data_raw_files').get('okun'))
+    df_ssqdx = pre_process_ssqdx_dataset(dataset_path=config.get('data_raw_files').get('ssqdx'))
     # %% Pre-process SSQ DATASET
-    df_anic = pre_process_anic_dataset(dataset_path=config.get('data_raw_files').get('anic'))
-    # df_anic['narcolepsy'] = df_anic['narcolepsy'].map({1: 'narcolepsy', 0: 'non-narcolepsy'})
-
+    df_ssq = pre_process_ssq_dataset(dataset_path=config.get('data_raw_files').get('ssq'))
+    df_ssq['narcolepsy'] = df_ssq['narcolepsy'].map({1: 'narcolepsy', 0: 'non-narcolepsy'})
     # %% Merge the two dataset
     # Mapping columns of SSQ HLA
     emotions_interest = ["LAUGHING", "QUICKVERBAL", "ANGER"]
     count_array = [str(i) for i in range(54, 74)]
-    narc_columns_a = [col for narcolepsy in count_array for col in df_anic if col.startswith(narcolepsy + 'a')]
+    narc_columns_a = [col for narcolepsy in count_array for col in df_ssq if col.startswith(narcolepsy + 'a')]
 
     # POSEMOT  cataplexy triggered by positive emotions
     columns_posemot = [
@@ -747,13 +670,13 @@ if __name__ == "__main__":
         '70a_exciting-game-cataplexy',
         '72a_joke-cataplexy',
     ]
-    df_anic['POSEMOT'] = df_anic.apply(make_new_col, axis=1, args=(columns_posemot,))
+    df_ssq['POSEMOT'] = df_ssq.apply(make_new_col, axis=1, args=(columns_posemot,))
     # DISNOCSLEEP  disturbed nocturnal sleep (patients complains of poor sleep at night)
     columns_dinocsleep = [
         '25_difficulty_falling_asleep_ever',
         '26_current_difficulty_falling_asleep',
     ]
-    df_anic['DISNOCSLEEP'] = df_anic.apply(make_new_col, axis=1, args=(columns_dinocsleep,))
+    df_ssq['DISNOCSLEEP'] = df_ssq.apply(make_new_col, axis=1, args=(columns_dinocsleep,))
     # NEGEMOT  cataplexy triggered by negative emotions, anger, embarrassment , stress etc (composite of multiple
     # answers as OR)
     columns_negemot = [
@@ -763,7 +686,7 @@ if __name__ == "__main__":
         '68a_startle-cataplexy',
         '69a_tension-cataplexy'
     ]
-    df_anic['NEGEMOT'] = df_anic.apply(make_new_col, axis=1, args=(columns_negemot,))
+    df_ssq['NEGEMOT'] = df_ssq.apply(make_new_col, axis=1, args=(columns_negemot,))
     # NDEMOT  CATAPLEXY triggered when remember an emotional moment (the only one I am less sure)
     columns_ndemot = [
         '55a_anger-cataplexy',
@@ -773,15 +696,16 @@ if __name__ == "__main__":
         '69a_tension-cataplexy',
         '73a_emotional-moment-cataplexy'
     ]
-    df_anic['NDEMOT'] = df_anic.apply(make_new_col, axis=1, args=(columns_ndemot,))
+    df_ssq['NDEMOT'] = df_ssq.apply(make_new_col, axis=1, args=(columns_ndemot,))
     columns_movedemot = [
         '59a_emotional-memory-cataplexy',
     ]
-    df_anic['MOVEDEMOT'] = df_anic.apply(make_new_col, axis=1, args=(columns_movedemot,))
+    df_ssq['MOVEDEMOT'] = df_ssq.apply(make_new_col, axis=1, args=(columns_movedemot,))
     for col in ['POSEMOT', 'NEGEMOT', 'NDEMOT', 'DISNOCSLEEP']:
-        print(f'{col}: \n{df_anic[col].value_counts()}')
+        print(f'{col}: \n{df_ssq[col].value_counts()}')
 
-    print(df_anic['DQB10602'].value_counts())
+    print(df_ssq['narcolepsy'].value_counts())
+    print(df_ssq['DQB10602'].value_counts())
 
     #  Transform column values so they match both sets
     mapper = {
@@ -798,8 +722,8 @@ if __name__ == "__main__":
         'ONSET': '95_first_muscle_weakness_age',
         'INJURED': '101_injured_during_episode',
         # 'MEDCATA': '',
-        'MSLT': 'MSLT',
-        'SOREMP': 'SOREMP',
+        # 'MSLT': '',
+        # 'SOREMP': '',
         # 'MSLTAGE': '',
         # 'DQB10602': '',
         'DISNOCSLEEP': 'DISNOCSLEEP',
@@ -807,116 +731,109 @@ if __name__ == "__main__":
         'NEGEMOT': 'NEGEMOT',
         'NDEMOT': 'NDEMOT',
         'MOVEDEMOT': 'MOVEDEMOT',
-        target:target,
-        target_nt2: target_nt2,
-        'source': 'source'
     }
     mapper_inv = {val: key for key, val in mapper.items()}
-    df_okun = df_okun.replace(to_replace='.', value=np.nan)
-    df_okun['ESS'] = df_okun['ESS'].astype(float)
+    df_ssqdx = df_ssqdx.replace(to_replace='.', value=np.nan)
+    df_ssqdx['ESS'] = df_ssqdx['ESS'].astype(float)
     # clip age to the SSQHLA
-    df_okun['Age'] = df_okun['Age'].astype(float)
-    df_anic[df_anic['age'] < 9] = np.nan
+    df_ssqdx['Age'] = df_ssqdx['Age'].astype(float)
+    df_ssq[df_ssq['age'] < 9] = np.nan
+    print(df_ssq['narcolepsy'].value_counts())
 
-    df_okun['sex'] = df_okun['sex'].replace({'M': 1, 'F': 0})
-    df_anic['gender'] = df_anic['gender'].replace({9: np.nan})
+    df_ssqdx['sex'] = df_ssqdx['sex'].replace({'M': 1, 'F': 0})
+    df_ssq['gender'] = df_ssq['gender'].replace({9: np.nan})
 
-    df_okun['Race'] = df_okun['Race'].replace({'Caucasian ': 'Caucasian'})
-    df_anic['ethnicity'] = df_anic['ethnicity'].replace({
+    df_ssqdx['Race'] = df_ssqdx['Race'].replace({'Caucasian ': 'Caucasian'})
+    df_ssq['ethnicity'] = df_ssq['ethnicity'].replace({
         'Cauc': 'Caucasian',
         'Latino': 'Latino',
         '9': np.nan,
     })
 
-    # df_okun['NAPS'].unique()
-    df_anic.loc[df_anic['39_nap_frequency'] > 100, '39_nap_frequency'] = np.nan
-    df_okun['NAPS'].value_counts()
-    df_anic['39_nap_frequency'].value_counts()
+    # df_ssqdx['NAPS'].unique()
+    df_ssq.loc[df_ssq['39_nap_frequency'] > 100, '39_nap_frequency'] = np.nan
+    df_ssqdx['NAPS'].value_counts()
+    df_ssq['39_nap_frequency'].value_counts()
 
     # %% visualization naps: start
     if PLOT:
-        sns.set_style("whitegrid")
-        plt.figure(figsize=(12, 6))
-        ax = sns.countplot(
-            x="39_nap_frequency",
-            hue=target,
-            data=df_anic,
-            palette="Set2"  # optional: choose any seaborn palette
-        )
-        plt.xlabel("Naps")
-        plt.ylabel("Count")
-        plt.title("Counts of 39_nap_frequency, Clustered by Target Category")
-        plt.legend(title="Target")
-        plt.tight_layout()
+        sns.countplot(x='39_nap_frequency', data=df_ssq)
+        plt.xticks(rotation=45)  # Rotate labels if needed
         plt.show()
 
+        column_name = 'NAPS'
+        df_naps = df_ssqdx.copy()
+        # Compute value counts and convert to DataFrame
+        counts = df_naps[column_name].value_counts().reset_index()
+        counts.columns = [column_name, 'count']
+        counts = counts.sort_values(by='count', ascending=False)
         sns.set_style("whitegrid")
-        plt.figure(figsize=(12, 4))
-        ax = sns.countplot(
-            x="NAPS",
-            hue=target,
-            data=df_okun,
-            palette="Set2"  # optional: choose any seaborn palette
-        )
-        plt.xlabel("Naps")
-        plt.ylabel("Count")
-        plt.title("Counts of Naps, Clustered by Target Category")
-        plt.legend(title="Target")
+        plt.figure(figsize=(12, 6))
+        ax = sns.barplot(x=column_name, y='count', data=counts)
+        plt.xticks(rotation=45)
+        plt.xlabel('Column Value')
+        plt.ylabel('Count')
+        plt.title('Value Counts of Column')
         plt.tight_layout()
         plt.show()
 
 
     # %% visualizatio naps: end
-    # df_okun['NAPS'].unique()
-    df_anic['45_sleepiness_severity_since_age'].value_counts()
-    # age sleep complaints columns are not perfect, feature engineer by combining and estimating
-    df_okun['SLEEPIONSET'] = df_okun['SLEEPIONSET'].replace({'33': 33})
+    # df_ssqdx['NAPS'].unique()
+    df_ssq['45_sleepiness_severity_since_age'].value_counts()
+    print(df_ssq['narcolepsy'].value_counts())
 
-    df_anic['46_age_sleep_complaint'] = df_anic.apply(create_sleep_complaint, axis=1)
+
+    # age sleep complaints columns are not perfect, feature engineer by combining and estimating
+    df_ssqdx['SLEEPIONSET'] = df_ssqdx['SLEEPIONSET'].replace({'33': 33})
+    print(df_ssq['narcolepsy'].value_counts())
+
+    df_ssq['46_age_sleep_complaint'] = df_ssq.apply(create_sleep_complaint, axis=1)
+    print(df_ssq['narcolepsy'].value_counts())
 
     if PLOT:
-        sns.histplot(df_anic['46_age_sleep_complaint'].dropna(), kde=True)
+        sns.histplot(df_ssq['46_age_sleep_complaint'].dropna(), kde=True)
         plt.grid(alpha=0.7)
         plt.tight_layout()
         plt.show()
-        plot_histograms(df1=df_okun,
-                        df2=df_anic,
+        plot_histograms(df1=df_ssqdx,
+                        df2=df_ssq,
                         col1=f'SLEEPIONSET',
                         col2=f'46_age_sleep_complaint',
-                        title=f'SSQHLA SLEEPIONSET {df_okun.shape[0]} \nVs \nSSQ 46_age_sleep_complaint {df_anic.shape[0]}')
+                        title=f'SSQHLA SLEEPIONSET {df_ssqdx.shape[0]} \nVs \nSSQ 46_age_sleep_complaint {df_ssq.shape[0]}')
 
     # Duration is ordinal -> 5-30sec, 13sec-2min, 2-10min, 10min++ -> 0,1,2,3
-    df_okun['DURATION'].unique()
-    df_anic['84_muscle_weakness_duration'] = df_anic['84_muscle_weakness_duration'].map({0: 0, 1: 1, 2: 2, 3: 3})
+    df_ssqdx['DURATION'].unique()
+    df_ssq['84_muscle_weakness_duration'] = df_ssq['84_muscle_weakness_duration'].map({0: 0, 1: 1, 2: 2, 3: 3})
     if PLOT:
-        sns.histplot(df_anic['84_muscle_weakness_duration'].dropna(), kde=True)
+        sns.histplot(df_ssq['84_muscle_weakness_duration'].dropna(), kde=True)
         plt.grid(alpha=0.7)
         plt.tight_layout()
         plt.show()
 
-    # frequency, in the anic is okay is they are not much since the majority are controls
-    # df_okun['FREQ'].unique()
-    df_anic['85_muscle_weakness_frequency'] = df_anic['85_muscle_weakness_frequency'].map({0: 0, 1: 1, 2: 2, 3: 3})
+    # frequency, in the ssq is okay is they are not much since the majority are controls
+    # df_ssqdx['FREQ'].unique()
+    df_ssq['85_muscle_weakness_frequency'] = df_ssq['85_muscle_weakness_frequency'].map({0: 0, 1: 1, 2: 2, 3: 3})
     if PLOT:
-        sns.histplot(df_anic['85_muscle_weakness_frequency'].dropna(), kde=True)
+        sns.histplot(df_ssq['85_muscle_weakness_frequency'].dropna(), kde=True)
         plt.grid(alpha=0.7)
         plt.tight_layout()
         plt.show()
 
-    df_okun['ONSET'].unique()
-    df_anic['95_first_muscle_weakness_age'].unique()
-    df_anic.loc[df_anic['95_first_muscle_weakness_age'] > 100, '95_first_muscle_weakness_age'] = np.nan
+    df_ssqdx['ONSET'].unique()
+    df_ssq['95_first_muscle_weakness_age'].unique()
+    df_ssq.loc[df_ssq['95_first_muscle_weakness_age'] > 100, '95_first_muscle_weakness_age'] = np.nan
     if PLOT:
-        sns.histplot(df_anic['95_first_muscle_weakness_age'].dropna(), kde=True)
+        sns.histplot(df_ssq['95_first_muscle_weakness_age'].dropna(), kde=True)
         plt.grid(alpha=0.7)
         plt.tight_layout()
         plt.show()
 
-    # df_okun['INJURED'].unique()
-    df_anic['101_injured_during_episode'].unique()
-    df_anic.loc[df_anic['101_injured_during_episode'] > 2, '101_injured_during_episode'] = np.nan
+    # df_ssqdx['INJURED'].unique()
+    df_ssq['101_injured_during_episode'].unique()
+    df_ssq.loc[df_ssq['101_injured_during_episode'] > 2, '101_injured_during_episode'] = np.nan
     if PLOT:
-        sns.histplot(df_anic['101_injured_during_episode'].dropna(), kde=True)
+        sns.histplot(df_ssq['101_injured_during_episode'].dropna(), kde=True)
         plt.grid(alpha=0.7)
         plt.tight_layout()
         plt.show()
@@ -924,34 +841,35 @@ if __name__ == "__main__":
     if PLOT:
         # comapre the columns side-by-side in a single dataframe and making histogram plots
         df_comparison_dist = pd.DataFrame()
-        for col_anichla, col_anic in mapper.items():
-            desc_anichla = df_okun[col_anichla].describe()
-            desc_anic = df_anic[col_anic].describe()
-            combined_desc = pd.concat([desc_anichla, desc_anic], axis=1)
-            combined_desc.columns = ['anichla', 'anic']
-            combined_desc['columns'] = f'{col_anichla}, {col_anic}'
+        for col_ssqhla, col_ssq in mapper.items():
+            desc_ssqhla = df_ssqdx[col_ssqhla].describe()
+            desc_ssq = df_ssq[col_ssq].describe()
+            combined_desc = pd.concat([desc_ssqhla, desc_ssq], axis=1)
+            combined_desc.columns = ['ssqhla', 'ssq']
+            combined_desc['columns'] = f'{col_ssqhla}, {col_ssq}'
             df_comparison_dist = pd.concat([df_comparison_dist, combined_desc])
 
-        for col_anichla, col_anic in mapper.items():
-            plot_histograms(df1=df_okun,
-                            df2=df_anic,
-                            col1=f'{col_anichla}',
-                            col2=f'{col_anic}',
-                            title=f'SSQHLA {col_anichla} {df_okun.loc[~df_okun[col_anichla].isna(), col_anichla].shape[0]} '
-                                  f'\nVs \nSSQ {col_anic} {df_anic.loc[~df_anic[col_anic].isna(), col_anic].shape[0]}')
+        for col_ssqhla, col_ssq in mapper.items():
+            plot_histograms(df1=df_ssqdx,
+                            df2=df_ssq,
+                            col1=f'{col_ssqhla}',
+                            col2=f'{col_ssq}',
+                            title=f'SSQHLA {col_ssqhla} {df_ssqdx.loc[~df_ssqdx[col_ssqhla].isna(), col_ssqhla].shape[0]} '
+                                  f'\nVs \nSSQ {col_ssq} {df_ssq.loc[~df_ssq[col_ssq].isna(), col_ssq].shape[0]}')
     # slice the frame with the columns of interest (intersection between SSQ and SSQHLA)
-    df_anic_to_merge = df_anic[[*mapper.values()]].copy()
+    df_ssq_to_merge = df_ssq[[*mapper.values()]].copy()
     # include the multiple target columns
-    df_anic_to_merge['DQB10602'] = df_anic['DQB10602']
-    # df_anic_to_merge['narcolepsy'] = df_anic['narcolepsy']
-    # df_anic_to_merge['target'] = df_anic['target']
-    # df_anic_to_merge['cataplexy_clear_cut'] = df_anic['cataplexy_clear_cut']
+    df_ssq_to_merge['DQB10602'] = df_ssq['DQB10602']
+    df_ssq_to_merge['narcolepsy'] = df_ssq['narcolepsy']
+    # df_ssq_to_merge['target'] = df_ssq['target']
+    df_ssq_to_merge['cataplexy_clear_cut'] = df_ssq['cataplexy_clear_cut']
 
-    print(df_anic_to_merge['DQB10602'].value_counts())
-    print(df_anic_to_merge[target].value_counts())
-    # print(df_anic_to_merge['target'].value_counts())
+    print(df_ssq_to_merge['DQB10602'].value_counts())
+    print(df_ssq_to_merge['narcolepsy'].value_counts())
+    # print(df_ssq_to_merge['target'].value_counts())
+    print(df_ssq_to_merge['cataplexy_clear_cut'].value_counts())
     # %% Emotions and muscle weakness equivalence (Mapping between the two datasets)
-    emotions_anic_anichla = {
+    emotions_ssq_ssqhla = {
         '56a_excitement-cataplexy': 'EXCITED',
         '73a_emotional-moment-cataplexy': 'MOVEDEMOT',
         '62a_disciplining-children-cataplexy': 'DISCIPLINE',
@@ -973,38 +891,37 @@ if __name__ == "__main__":
         '58a_happy-memory-cataplexy': 'HAPPY',
         '57a_surprise-cataplexy': 'SURPRISED'
     }
-    # df_emotions = pd.DataFrame.from_dict(emotions_anic_anichla, orient='index', columns=['Emotion'])
+    # df_emotions = pd.DataFrame.from_dict(emotions_ssq_ssqhla, orient='index', columns=['Emotion'])
     # df_emotions = df_emotions.reset_index().rename(columns={'index': 'Event'})
 
-    for emotion_anic_, emotions_anic_anichla_ in emotions_anic_anichla.items():
-        df_anic_to_merge[emotions_anic_anichla_] = df_anic[emotion_anic_]
+    for emotion_ssq_, emotions_ssq_ssqhla_ in emotions_ssq_ssqhla.items():
+        df_ssq_to_merge[emotions_ssq_ssqhla_] = df_ssq[emotion_ssq_]
 
-    df_anic_to_merge['JAW'] = df_anic[f'{77}_{key_mapping.get(77)}']
-    df_anic_to_merge['KNEES'] = df_anic[f'{76}_{key_mapping.get(76)}'].apply(quest76map)
-    df_anic_to_merge['HEAD'] = df_anic[f'{78}_{key_mapping.get(78)}']
-    df_anic_to_merge['HAND'] = df_anic[f'{79}_{key_mapping.get(79)}']
+    df_ssq_to_merge['JAW'] = df_ssq[f'{77}_{key_mapping.get(77)}']
+    df_ssq_to_merge['KNEES'] = df_ssq[f'{76}_{key_mapping.get(76)}'].apply(quest76map)
+    df_ssq_to_merge['HEAD'] = df_ssq[f'{78}_{key_mapping.get(78)}']
+    df_ssq_to_merge['HAND'] = df_ssq[f'{79}_{key_mapping.get(79)}']
 
 
     # falling experience with experience 6
-    col_exp_falling = [col for col in df_anic.columns if '_exp_6' in col]
-    df_anic_to_merge['FALL'] = df_anic[col_exp_falling].any(axis=1).astype(int)
+    col_exp_falling = [col for col in df_ssq.columns if '_exp_6' in col]
+    df_ssq_to_merge['FALL'] = df_ssq[col_exp_falling].any(axis=1).astype(int)
 
     # rename the columns
-    df_anic_to_merge.rename(mapper_inv, inplace=True, axis=1)
-    df_anic_to_merge['DQB10602'].value_counts()
+    df_ssq_to_merge.rename(mapper_inv, inplace=True, axis=1)
+    df_ssq_to_merge['DQB10602'].value_counts()
     # %% include the missing columns (not measure from the questionnaire)
-    # df_okun.shape
-    # df_anic_to_merge.shape
-    for col in df_okun.columns:
-        if not col in df_anic_to_merge.columns:
+    # df_ssqdx.shape
+    # df_ssq_to_merge.shape
+    for col in df_ssqdx.columns:
+        if not col in df_ssq_to_merge.columns:
             # print(col)
-            df_anic_to_merge[col] = np.nan
+            df_ssq_to_merge[col] = np.nan
     # %% complete the merge
-    df_data = pd.concat([df_okun, df_anic_to_merge], axis=0)
+    df_ssqdx['source'] = 'ssqdx'
+    df_ssq_to_merge['source'] = 'ssq'
+    df_data = pd.concat([df_ssqdx, df_ssq_to_merge], axis=0)
     df_data.reset_index(inplace=True, drop=True)
-    tab_one = visualize_table(df=df_data, group_by=['source', 'DQB10602', target])
-    tab_one = visualize_table(df=df_okun, group_by=['source', 'DQB10602', target])
-
     # df_data.rename(columns={'DQB10602': 'target'}, inplace=True)
     if PLOT:
         palette = sns.color_palette("Set2",
@@ -1039,20 +956,20 @@ if __name__ == "__main__":
 
     # %% Check data types on emotions and muscle weaknesses
     # keep them as binary responses yes/no
-    emotions_anichla = {
+    emotions_ssqhla = {
         "LAUGHING", "EXCITED", "HAPPY", "QUICKVERBAL", "SEX", "ELATED", "PLAYGAME",
         "JOKING", "NEGEMOT", "ANGER", "EMBARRAS", "DISCIPLINE", "STRESSED", "TENSE",
         "NDEMOT", "SURPRISED", "EMOTIONAL", "DURATHLETIC", "AFTATHLETIC", "STARTLED",
         "ROMANTIC", "MOVEDEMOT"
     }
     # muscle weakness
-    mw_anichla = {'KNEES', 'JAW', 'HEAD', 'HAND', 'SPEECH'}
+    mw_ssqhla = {'KNEES', 'JAW', 'HEAD', 'HAND', 'SPEECH'}
 
-    for col in emotions_anichla:
+    for col in emotions_ssqhla:
         # print(f'\n{col}: {df_data[col].value_counts()}')
         df_data[col] = df_data[col].apply(set_to_zero_except_one)
 
-    for col in mw_anichla:
+    for col in mw_ssqhla:
         # print(f'\n{col}: {df_data[col].value_counts()}')
         df_data[col] = df_data[col].apply(set_to_zero_except_one)
 
@@ -1064,36 +981,23 @@ if __name__ == "__main__":
         "Age",
         "BMI",
     ]
-    # cols_tail = [
-    #     "CATCODE",
-    #     "MEDCATA",
-    #     "MSLT",
-    #     "SOREMP",
-    #     "MSLTAGE",
-    #     "SE",
-    #     "REMLAT",
-    #     "RDI",
-    #     "PLMIND",
-    #     "Dx",
-    #     "contains_A_to_F",
-    #     "narcolepsy",
-    #     "cataplexy_clear_cut",
-    #     "DQB10602",
-    #     'source'
-    # ]
-    cols_tail = ['CATCODE',
-                 'MEDCATA',
-                 'RDI',
-                 'PLMIND',
-                 # 'Dx',
-                 'DQB10602',
-                 'source',
-                 'MSLT',
-                 'SOREMP',
-                 target,
-                 target_nt2
-                 ]
-
+    cols_tail = [
+        "CATCODE",
+        "MEDCATA",
+        "MSLT",
+        "SOREMP",
+        "MSLTAGE",
+        "SE",
+        "REMLAT",
+        "RDI",
+        "PLMIND",
+        "Dx",
+        "contains_A_to_F",
+        "narcolepsy",
+        "cataplexy_clear_cut",
+        "DQB10602",
+        'source'
+    ]
     col_middle = [col for col in df_data.columns if not (col in cols_head or col in cols_tail)]
     columns = cols_head + col_middle + cols_tail
     df_data = df_data[columns]
@@ -1101,44 +1005,92 @@ if __name__ == "__main__":
     # keep the binary nature of the variable
     df_data['DISNOCSLEEP'] = df_data['DISNOCSLEEP'].clip(upper=1)
 
-    # df_data.to_excel('anic_okun_data.xlsx', index=False)
-    df_data = df_data.loc[~df_data['source'].isna(), :]
-    df_data = df_data.loc[~df_data[target].isna(), :]
-    df_data = df_data.loc[df_data[target].isin([0, 1]), :]
-    # df_data = df_data.loc[~df_data[target].isna(), :]
-    df_data = df_data[~df_data['DQB10602'].isna()]
+    # %% Check agin the DX columns to
+    # Ant A-F is narcolepsy, if outside then pseudo narcolepsy
 
-    df_data.reset_index(inplace=True, drop=True)
+    # %% Filter and Clean the diagnosis
+    df_data['narcolepsy'] = df_data['narcolepsy'].replace({'non-narcolepsy': 'non-narcoleptic'})
+    # remove rows that in the Dx columns they contain Gm H/A, H/D
+    pattern = r'G|H/A|H/D'
+    # df_ssqdx['pattern'] = df_ssqdx['Dx'].str.contains(pattern, na=False)
+    df_data = df_data[~df_data['Dx'].str.contains(pattern, na=False)]
+    # harmonize the narcolepsy column
+    # assert the unique values
+    assert df_data['narcolepsy'].value_counts().shape[0] == 4
+    assert df_data['DQB10602'].value_counts().shape[0] == 2
+    assert df_data['cataplexy_clear_cut'].value_counts().shape[0] == 2
 
+    verification_results,tabs, df_data = wrangle_target_combinations(df=df_data.copy())
+    # df_data.cataplexy_clear_cut.value_counts()  # check we have cases and controls
+    df_data = df_data.loc[~df_data['DQB10602'].isna(),:]
 
-    tab = visualize_table(df=df_data,
-                          group_by=['source', 'DQB10602', target, target_nt2]) #
+    # %% Imputation Age, Sex and ESS
+    categorical_var = ['sex',
+                       'Ethnicity',
+                       'LAUGHING', 'ANGER', 'EXCITED','SURPRISED', 'HAPPY',
+                       'EMOTIONAL', 'QUICKVERBAL', 'EMBARRAS', 'DISCIPLINE',
+                       'SEX', 'DURATHLETIC', 'AFTATHLETIC', 'ELATED', 'STRESSED',
+                       'STARTLED', 'TENSE', 'PLAYGAME', 'ROMANTIC', 'JOKING', 'MOVEDEMOT',
+                       'KNEES', 'JAW', 'HEAD', 'HAND', 'SPEECH', 'DISNOCSLEEP'
+                       # 'DURATION', 'CATSEVER',
+                       # 'ONSET', 'HALLUC', 'HHONSET', 'HHSEVERITY', 'SP', 'SPSEVER', 'SPONSET',
+                       # 'SPMEDS', 'FREQ', 'INJURED', 'POSEMOT', 'NEGEMOT', 'NDEMOT', 'CATCODE',
+                       # 'MEDCATA', 'MSLT', 'SOREMP', 'MSLTAGE', 'SE', 'REMLAT', 'RDI', 'PLMIND'
+                       # 'cataplexy_sampled', 'cataplexy'
+                       ]
 
-    tab['DQB10602'] = tab['DQB10602'].replace({1: '+', 0:'-'})
-    tab[target] = tab[target].replace({1: 'case',
-                                       0:'control'})
-    tab[target_nt2] = tab[target_nt2].replace({1: 'case',
-                                               0:'control'})
+    continuous_var = ['Age', 'BMI', 'ESS', 'NAPS', 'SLEEPIONSET', 'ONSET']  # DISNOCSLEEP
+    columns = list(set(categorical_var + continuous_var))
 
+    df_nan_count = df_data.isna().sum(0)
+    df_impute = df_data.drop(columns=df_nan_count[df_nan_count > 15].index)
 
-    tab.to_csv(config.get('results_path')['results'].joinpath('tab_okun_target_raw.csv'), index=False)
+    covariates_list = continuous_var + categorical_var
+    covariates_list = [cov for cov in covariates_list if cov in df_impute.columns]
+    # Create the covariates dictionary with appropriate types
+    covariates = {cov: 'continuous' for cov in continuous_var if cov in covariates_list}
+    covariates.update({cov: 'ordinal' for cov in categorical_var if cov in covariates_list})
 
+    # Identify columns that will be imputed
+    imputed_columns = df_impute[covariates_list].isnull().any()
+    imputed_columns_list = imputed_columns[imputed_columns].index.tolist()
 
-    # %% remove the non meeting criteria for the target
-    # NT1 ICSD3 - TR
-    # 0                    929
-    # 1                    289
-    # not meet criteria    211
-    # Name: count, dtype: int64
+    imputer = IterativeImputer(
+        estimator=BayesianRidge(),  # Model for the imputation process
+        max_iter=100,  # Maximum number of imputation rounds
+        tol=1e-3,  # Convergence tolerance
+        n_nearest_features=2,  # Use 2 nearest features to estimate missing values
+        initial_strategy="mean",  # Initial strategy to start filling missing values
+        imputation_order="ascending"  # Order of imputation (ascending by missing values)
+    )
 
-    # NT2 ICSD3 - TR
-    # 0                    1173
-    # not meet criteria     201
-    # 1                      54
-    # Name: count, dtype: int64
+    # Fit the imputer on the data and transform it
+    imputed_data = imputer.fit_transform(df_impute[covariates_list])
+    df_imputed = pd.DataFrame(imputed_data, columns=covariates_list, index=df_data.index)
+    # Round the ordinal columns
+    for col, col_type in covariates.items():
+        if col_type == 'ordinal':
+            df_imputed[col] = np.round(df_imputed[col]).astype(int)
+    # compare
+    imputed_columns = {key: covariates.get(key) for key in imputed_columns_list}
+    df_comparison_results = compare_imputation(df_data, df_imputed, imputed_columns)
+
+    # include the remaining columns
+    col_missing = [col for col in df_data.columns if not col in df_imputed.columns]
+    df_imputed[col_missing] = df_data[col_missing]
+
+    # one observation that narcolepsy is nan
+    df_imputed = df_imputed.loc[~df_imputed['narcolepsy'].isna(), :]
+    # Reorder df_imputed to have the same column order as df_data
+    df_imputed = df_imputed[df_data.columns]
+    assert df_imputed['cataplexy_clear_cut'].isna().sum() == 0
+    assert df_imputed['narcolepsy'].isna().sum() == 0
+    assert df_imputed['DQB10602'].isna().sum() == 0
 
     #%% save dataset
-    df_data.to_csv(config.get('data_pre_proc_files').get('anic_okun'), index=False)
+    df_imputed.to_csv(config.get('data_pre_proc_files').get('ssq_ssqdx_imputed'), index=False)
+
+    df_data.to_csv(config.get('data_pre_proc_files').get('ssq_ssqdx'), index=False)
 
 
 

@@ -17,13 +17,17 @@ from typing import Optional, Tuple, List
 
 if __name__ == '__main__':
     # %% Read data
-    df_data = pd.read_csv(config.get('data_pre_proc_files').get('ssq_ssqdx'))
-    df_data = df_data.loc[df_data['narcolepsy'] != 'pseudo narcolepsy']
-    df_data.rename(columns={'cataplexy_clear_cut': 'NT1'}, inplace=True)
+    # df_data = pd.read_csv(config.get('data_pre_proc_files').get('ssq_ssqdx'))
+    # df_data = df_data.loc[df_data['narcolepsy'] != 'pseudo narcolepsy']
+    # df_data.rename(columns={'cataplexy_clear_cut': 'NT1'}, inplace=True)
+
+    df_data = pd.read_csv(config.get('data_pre_proc_files').get('anic_okun'))
+
+    # df_data.rename(columns={'cataplexy_clear_cut': 'NT1'}, inplace=True)
 
     # %% output paths
     TEST = False
-    OVERWRITE = True
+    OVERWRITE = False
     test = 'test_' if TEST else ''
     path_avg_metrics_config = config.get('results_path').get('results').joinpath(f'{test}avg_metrics_config.csv')
     path_classifications_config = config.get('results_path').get('results').joinpath(f'{test}classifications_config.csv')
@@ -33,8 +37,11 @@ if __name__ == '__main__':
     path_feature_importance = config.get('results_path').get('results').joinpath(f'{test}feature_importance.csv')
     path_pred_prob_elastic = config.get('results_path').get('results').joinpath(f'{test}pred_prob_elasticnet.csv')
     # path_avg_paper_veto = config.get('results_path').get('results').joinpath(f'avg_paper_veto.csv')
+    path_plot_best_model = config.get('results_path').get('main_model')
     # %% Select columns and drop columns with nans
-    target = 'NT1'
+    target = 'NT1 ICSD3 - TR'
+    target_nt2 = target.replace('1', '2')
+
     categorical_var = ['sex', 'LAUGHING', 'ANGER', 'EXCITED',
                        'SURPRISED', 'HAPPY', 'EMOTIONAL', 'QUICKVERBAL', 'EMBARRAS',
                        'DISCIPLINE', 'SEX', 'DURATHLETIC', 'AFTATHLETIC', 'ELATED',
@@ -209,15 +216,23 @@ if __name__ == '__main__':
     df_avg_metrics.to_csv(path_avg_paper, index=False)
 
 
-    plot_model_metrics(df_avg_metrics, palette='muted', figsize=(16, 8))
+    # plot_model_metrics(df_avg_metrics, palette='muted', figsize=(16, 8))
 
-
-
-    columns_to_plot = ['f1_score', 'npv', 'sensitivity', 'specificity']  # Example list of columns
-    plot_model_metrics_specific_columns(df_avg_metrics,
+    df_avg_metrics_copy = df_avg_metrics.copy()
+    df_avg_metrics_copy = df_avg_metrics_copy.rename(columns={
+        'ppv_apparent': 'PPV Apparent',
+        'ppv': 'PPV',
+        'f1_score': 'F1 Score',
+        'specificity': 'Specificity',
+        'sensitivity': 'Sensitivity',
+    })
+    columns_to_plot = ['Specificity', 'Sensitivity', 'F1 Score', 'PPV', 'PPV Apparent'] #  'f1_score', 'npv', 'ppv']  # Example list of columns
+    plot_model_metrics_specific_columns(df_avg_metrics_copy,
                        columns=columns_to_plot,
-                       palette='muted',
-                       figsize=(16, 4))
+                       palette='pastel',
+                       figsize=(18, 4.5))
+
+
 
     # %%
     # Extract classification metrics
@@ -321,17 +336,23 @@ if __name__ == '__main__':
     df_feature_importance['configuration'].replace(feature_set_mapper, inplace=True)
 
     plot_elastic_net_model_coefficients(df_feature_importance,
-                                        output_path=None,)
+                                        output_path=path_plot_best_model)
 
 
     # %% decison curve
     df_elastic_pred = pd.read_csv(path_pred_prob_elastic)
     # from dcurves import plot_graphs, my_plot_graphs
+    df_elastic_pred_dcurve = df_elastic_pred.copy()
 
+    df_elastic_pred_dcurve['configuration_formal'] = df_elastic_pred_dcurve['configuration'].map(feature_set_mapper)
     # Example usage:
     # Assume you have a DataFrame "results" with columns 'true_label' and 'pred_prob'.
     prevalence = 30 / 100000  # i.e., 0.0003
-    plot_dcurves_per_fold(df_results=df_elastic_pred, prevalence=prevalence)
+    for feature_set_config in df_elastic_pred_dcurve['configuration_formal'].unique():
+        plot_dcurves_per_fold(df_results= df_elastic_pred_dcurve,
+                              prevalence=prevalence,
+                              configuration=feature_set_config,
+                              output_path=path_plot_best_model)
 
     # %% Prevalance plot
     best_model = 'Elastic Net'
@@ -341,20 +362,24 @@ if __name__ == '__main__':
     #                rows=2,
     #                figsize=(12,8),
     #                output_path=None)
+    df_elastic_pred_config['configuration'].replace(feature_set_mapper, inplace=True)
 
     multi_ppv_plot_combined(df_predictions_model=df_elastic_pred_config,
                    figsize=(10,6),
-                   output_path=None)
+                    population_prevalence = 30 / 100000,  # 0.0003
+                   output_path=path_plot_best_model)
+
+
 
     # %% calibration plot
 
-    df_elastic_pred_config['configuration'].replace(feature_set_mapper, inplace=True)
+    # df_elastic_pred_config['configuration'].replace(feature_set_mapper, inplace=True)
 
     # all in one figure
     df_brier_scores = multi_calibration_plot(df_predictions=df_elastic_pred_config,
                            model_name=best_model,
                            rows=2,
-                           output_path=None)
+                           output_path=path_plot_best_model)
 
 
     df_grouped = df_brier_scores.groupby('configuration').agg(
@@ -364,6 +389,7 @@ if __name__ == '__main__':
     ).reset_index()
 
     df_grouped['configuration'].replace(feature_set_mapper, inplace=True)
+    df_grouped.to_csv(path_plot_best_model.joinpath('loss_metrics_elastic_net.csv'), index=False)
 
     # %% Check feature distribution across the folds
     # Load folds
