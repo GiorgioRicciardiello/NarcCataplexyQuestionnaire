@@ -35,6 +35,7 @@ if __name__ == '__main__':
     path_avg_classifications_config_veto = config.get('results_path').get('results').joinpath(f'{test}classifications_config_veto.csv')
     path_avg_paper = config.get('results_path').get('results').joinpath(f'{test}avg_paper.csv')
     path_feature_importance = config.get('results_path').get('results').joinpath(f'{test}feature_importance.csv')
+    path_model_metrics = config.get('results_path').get('results').joinpath(f'model_metrics.png')
     path_pred_prob_elastic = config.get('results_path').get('results').joinpath(f'{test}pred_prob_elasticnet.csv')
     # path_avg_paper_veto = config.get('results_path').get('results').joinpath(f'avg_paper_veto.csv')
     path_plot_best_model = config.get('results_path').get('main_model')
@@ -230,7 +231,8 @@ if __name__ == '__main__':
     plot_model_metrics_specific_columns(df_avg_metrics_copy,
                        columns=columns_to_plot,
                        palette='pastel',
-                       figsize=(18, 4.5))
+                       figsize=(18, 4.5),
+                        output_path=path_model_metrics)
 
 
 

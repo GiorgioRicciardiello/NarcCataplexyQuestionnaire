@@ -224,7 +224,8 @@ def plot_model_metrics(df: pd.DataFrame,
 def plot_model_metrics_specific_columns(df: pd.DataFrame,
                                         columns: List[str],
                                         palette: Optional[str] = 'muted',
-                                        figsize: Optional[Tuple] = (16, 8)):
+                                        figsize: Optional[Tuple] = (16, 8),
+                                        output_path:pathlib=None):
     """
     Plot specified metrics for each model and configuration in vertically-stacked subplots.
 
@@ -295,6 +296,8 @@ def plot_model_metrics_specific_columns(df: pd.DataFrame,
 
     # Adjust layout to accommodate legend above the plot
     plt.tight_layout(rect=[0, 0, 1, 0.9])  # Leave space at the top for legend
+    if output_path:
+        plt.savefig(output_path, bbox_inches='tight', dpi=300)
     plt.show()
 
 
