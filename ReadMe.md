@@ -1,5 +1,8 @@
 # **NarcCataplexyQuestionnaire**  
 A machine learning pipeline for optimizing the **Stanford Cataplexy Questionnaire** scoring to improve **Narcolepsy Type 1 (NT1) detection**. This project integrates **clinical questionnaire data, HLA-DQB1*06:02 biomarker information, and machine learning models** to achieve **high-specificity NT1 classification**, reducing misdiagnoses and unnecessary sleep studies.
+![Alternative text](docs/poster_ppt/RG_NT1_Poster_Seattle_Big_page-0001.jpg)
+
+
 
 ## **Project Structure**  
 
