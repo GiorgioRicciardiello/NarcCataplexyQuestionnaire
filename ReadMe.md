@@ -1,6 +1,6 @@
 # **NarcCataplexyQuestionnaire**  
 A machine learning pipeline for optimizing the **Stanford Cataplexy Questionnaire** scoring to improve **Narcolepsy Type 1 (NT1) detection**. This project integrates **clinical questionnaire data, HLA-DQB1*06:02 biomarker information, and machine learning models** to achieve **high-specificity NT1 classification**, reducing misdiagnoses and unnecessary sleep studies.
-![Alternative text](docs/poster_ppt/RG_NT1_Poster_Seattle_Big_page-0001.jpg)
+![Alternative text](docs/RG_NT1_Poster_Seattle_Big_Updated.png)
 
 
 
@@ -42,6 +42,8 @@ NarcCataplexyQuestionnaire
 │   ├── pre_processing.py        # Data preprocessing pipeline  
 │  
 │── main.py                      # Main entry point for executing the ML pipeline  
+│── main_full_and_cross_val.py   # Main entry point for executing the ML pipeline using the full dataset and cv
+│── roc_curve_plots.py           # Generata the roc curves to determine the best cut-off for each model
 ```
 
 ## **Setup & Installation**  

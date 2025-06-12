@@ -5,7 +5,7 @@ from library.ml_models import (compute_cross_validation,
                                models,
                                make_veto_dataset,
                                load_imputed_folds,
-                               summarize_fold_consistency)
+                               summarize_fold_consistency, compute_full_training)
 from library.metrics_functions import apply_veto_rule_re_classifications
 from library.plot_functions import (plot_model_metrics, plot_model_metrics_specific_columns,
                                     create_venn_diagram, plot_elastic_net_model_coefficients,
@@ -28,18 +28,38 @@ if __name__ == '__main__':
     # %% output paths
     TEST = True
     OVERWRITE = True
-    test = 'test_' if TEST else ''
-    path_avg_metrics_config = config.get('results_path').get('results').joinpath(f'{test}avg_metrics_config.csv')
-    path_classifications_config = config.get('results_path').get('results').joinpath(f'{test}classifications_config.csv')
-    path_avg_metrics_veto = config.get('results_path').get('results').joinpath(f'{test}avg_metrics_veto.csv')
-    path_avg_classifications_config_veto = config.get('results_path').get('results').joinpath(f'{test}classifications_config_veto.csv')
-    path_avg_paper = config.get('results_path').get('results').joinpath(f'{test}avg_paper.csv')
-    path_feature_importance = config.get('results_path').get('results').joinpath(f'{test}feature_importance.csv')
+    test_flag = 'test_' if TEST else ''
+    base_path = config.get('results_path').get('results')
+
+    path_avg_metrics_config          = base_path.joinpath(f'{test_flag}avg_metrics_config.csv')
+    path_classifications_config      = base_path.joinpath(f'{test_flag}classifications_config.csv')
+    path_feature_importance          = base_path.joinpath(f'{test_flag}feature_importance.csv')
+    path_pred_prob_elastic           = base_path.joinpath(f'{test_flag}pred_prob_elasticnet.csv')
+    path_models_pred_prob            = base_path.joinpath(f'{test_flag}pred_prob_all_models.csv')
+
+    # Paths for full‐dataset (no cross‐val) results
+    path_full_metrics                = base_path.joinpath(f'{test_flag}full_dataset_metrics.csv')
+    path_full_classifications        = base_path.joinpath(f'{test_flag}full_dataset_classifications.csv')
+    path_full_elastic_params         = base_path.joinpath(f'{test_flag}full_dataset_elastic_params.csv')
+
+
+    path_avg_metrics_veto = config.get('results_path').get('results').joinpath(f'{test_flag}avg_metrics_veto.csv')
+    path_avg_classifications_config_veto = config.get('results_path').get('results').joinpath(f'{test_flag}classifications_config_veto.csv')
+    path_avg_paper = config.get('results_path').get('results').joinpath(f'{test_flag}avg_paper.csv')
     path_model_metrics = config.get('results_path').get('results').joinpath(f'model_metrics.png')
-    path_pred_prob_elastic = config.get('results_path').get('results').joinpath(f'{test}pred_prob_elasticnet.csv')
     # path_avg_paper_veto = config.get('results_path').get('results').joinpath(f'avg_paper_veto.csv')
     path_plot_best_model = config.get('results_path').get('main_model')
     path_fp_fp_tn_fn_tab = config.get('results_path').get('results').joinpath('tab_fp_fp_tn_fn.csv')
+
+    # full dataset model
+    path_full_dataset_metrics = config.get('results_path').get('results').joinpath(f'{test_flag}full_dataset_metrics.csv')
+    path_full_dataset_classifications = config.get('results_path').get('results').joinpath(f'{test_flag}full_elastic_params.csv')
+    path_full_dataset_elastic_params = config.get('results_path').get('results').joinpath(f'{test_flag}full_elastic_params.csv')
+
+    # pred and prob of full dataset concat with k-folds
+    path_models_pred_pob = config.get('results_path').get('results').joinpath(f'{test_flag}pred_pob.csv')
+
+
     # %% Select columns and drop columns with nans
     target = 'NT1 ICSD3 - TR'
     target_nt2 = target.replace('1', '2')
@@ -128,56 +148,114 @@ if __name__ == '__main__':
 
     # run the analysis if the files do not exist or it overwrite is set to True
     if not (path_avg_metrics_config.is_file() and path_classifications_config.is_file()) or OVERWRITE:
-        df_feature_importance = pd.DataFrame()
-        df_avg_metrics_models = {}
-        k = 5
-        df_classifications_configs = pd.DataFrame()
-        df_metrics_configs = pd.DataFrame()
-        df_elastic_pred_config = pd.DataFrame()
+        # Accumulators across all configurations
+        df_all_classifications = pd.DataFrame()
+        df_all_metrics         = pd.DataFrame()
+        df_all_feature_imp     = pd.DataFrame()
+        df_all_elastic_preds   = pd.DataFrame()
+        df_all_full_metrics    = pd.DataFrame()
+        df_all_full_classif    = pd.DataFrame()
+        df_all_full_elastic    = pd.DataFrame()
+        df_all_model_probs     = pd.DataFrame()
+        k = 5  # number of folds
         for conf_name, conf_values in configurations.items():
-            # conf_name = 'questionnaire_hla'
-            # conf_values = configurations.get(conf_name)
-            print(f'Computing configuration: {conf_name}')
-            df_avg_metrics_models[conf_name] = {}
-            df_model, df_dqb_veto = make_veto_dataset(df_data=df_data,
-                                                      use_dqb10602=conf_values.get('dqb'))
+            print(f'Running configuration: {conf_name}')
 
-            (df_avg_metrics,
-             df_classifications,
-             df_elastic_params,
-             df_elastic_pred) = compute_cross_validation(models=models,
-                                                     df_model=df_model,
-                                                     features=conf_values.get('features'),
-                                                     target=conf_values.get('target'),
-                                                      k=k)
+            # 1) Build the dataset (with/without DQB1*06:02) + optional veto logic
+            df_model, df_dqb_veto = make_veto_dataset(
+                df_data=df_data,
+                use_dqb10602=conf_values['dqb']
+            )
 
-            df_classifications['hla'] = conf_values.get('dqb')
+            # 2) FULL‐DATA (no cross‐validation) training
+            (
+                df_full_metrics,
+                df_full_classifications,
+                df_full_elastic_params,
+                df_full_model_probs
+            ) = compute_full_training(
+                models=models,
+                df_model=df_model,
+                features=conf_values['features'],
+                target=conf_values['target'],
+            )
+
+            # 3) K‐FOLD CROSS‐VALIDATION
+            (
+                df_avg_metrics,
+                df_classifications,
+                df_elastic_params,
+                df_elastic_preds,
+                df_fold_model_probs
+            ) = compute_cross_validation(
+                models=models,
+                df_model=df_model,
+                features=conf_values['features'],
+                target=conf_values['target'],
+                k=k
+            )
+
+            # Add metadata columns for configuration & HLA flag
             df_classifications['config'] = conf_name
-            df_classifications_configs = pd.concat([df_classifications_configs, df_classifications])
+            df_classifications['hla']    = conf_values['dqb']
+            df_all_classifications = pd.concat([df_all_classifications, df_classifications], ignore_index=True)
 
             df_avg_metrics['config'] = conf_name
-            df_metrics_configs = pd.concat([df_metrics_configs, df_avg_metrics])
-            # elastic net feature importance
-            df_elastic_params['configuration'] = conf_name
-            df_feature_importance = pd.concat([df_feature_importance, df_elastic_params])
-            # elastic net predictions
-            df_elastic_pred['configuration'] = conf_name
-            df_elastic_pred_config = pd.concat([df_elastic_pred_config, df_elastic_pred])
+            df_all_metrics = pd.concat([df_all_metrics, df_avg_metrics], ignore_index=True)
 
-        df_classifications_configs.reset_index(inplace=True, drop=True)
-        df_metrics_configs.reset_index(inplace=True, drop=True)
+            df_elastic_params['config'] = conf_name
+            df_all_feature_imp = pd.concat([df_all_feature_imp, df_elastic_params], ignore_index=True)
 
-        # organize the metrics
-        model_order = df_metrics_configs.loc[df_metrics_configs['config'] == 'questionnaire', :].sort_values(by=['specificity'],
-                                                                                     ascending=False).model.values
-        df_metrics_configs['model'] = pd.Categorical(df_metrics_configs['model'], categories=model_order, ordered=True)
-        df_metrics_configs = df_metrics_configs.sort_values(by=['config', 'specificity'], ascending=[True, False])  # ['config', 'model']
-        # Save the results
-        df_metrics_configs.to_csv(path_avg_metrics_config, index=False)
-        # df_metrics_configs[['config', 'model', 'specificity']]
-        df_classifications_configs.to_csv(path_classifications_config, index=False)
-        df_feature_importance.to_csv(path_feature_importance, index=False)
-        df_elastic_pred_config.to_csv(path_pred_prob_elastic, index=False)
+            df_elastic_preds['config'] = conf_name
+            df_all_elastic_preds = pd.concat([df_all_elastic_preds, df_elastic_preds], ignore_index=True)
+
+            # Combine the fold & full‐data probability DataFrames
+            df_fold_model_probs['config']      = conf_name
+            df_fold_model_probs['hla']         = conf_values['dqb']
+            df_full_model_probs['config']      = conf_name
+            df_full_model_probs['hla']         = conf_values['dqb']
+            df_combined_probs = pd.concat(
+                [df_fold_model_probs, df_full_model_probs],
+                ignore_index=True
+            )
+            df_all_model_probs = pd.concat([df_all_model_probs, df_combined_probs], ignore_index=True)
+
+            # Collect full‐data results
+            df_full_metrics['config']         = conf_name
+            df_all_full_metrics = pd.concat([df_all_full_metrics, df_full_metrics], ignore_index=True)
+
+            df_full_classifications['config'] = conf_name
+            df_all_full_classif = pd.concat([df_all_full_classif, df_full_classifications], ignore_index=True)
+
+            df_full_elastic_params['config']  = conf_name
+            df_all_full_elastic = pd.concat([df_all_full_elastic, df_full_elastic_params], ignore_index=True)
+
+        # ---------------------------
+        # Post‐processing & saving
+        # ---------------------------
+
+        # 1) Finalize cross‐val metrics ordering
+        model_order = df_all_metrics.loc[
+            df_all_metrics['config'] == 'questionnaire'
+        ].sort_values(by='specificity', ascending=False)['model'].values
+        df_all_metrics['model'] = pd.Categorical(df_all_metrics['model'], categories=model_order, ordered=True)
+        df_all_metrics = df_all_metrics.sort_values(
+            by=['config', 'specificity'], ascending=[True, False]
+        )
+
+        # 2) Save cross‐validation results
+        df_all_metrics.to_csv(path_avg_metrics_config, index=False)
+        df_all_classifications.to_csv(path_classifications_config, index=False)
+        df_all_feature_imp.to_csv(path_feature_importance, index=False)
+        df_all_elastic_preds.to_csv(path_pred_prob_elastic, index=False)
+        df_all_model_probs['config'] = df_all_model_probs['config'].map(feature_set_mapper)
+        df_all_model_probs.to_csv(path_models_pred_prob, index=False)
+
+
+        # 3) Save full‐data (no cross‐val) results
+        df_all_full_metrics.to_csv(path_full_metrics, index=False)
+        df_all_full_classif.to_csv(path_full_classifications, index=False)
+        df_all_full_elastic.to_csv(path_full_elastic_params, index=False)
     else:
         df_metrics_configs = pd.read_csv(path_avg_metrics_config)
         df_classifications_configs = pd.read_csv(path_classifications_config)
@@ -236,6 +314,7 @@ if __name__ == '__main__':
                         output_path=path_model_metrics)
 
 
+    # TODO: INlcue the ROC cuvre with all the models in the same figure
 
     # %%
     # Extract classification metrics

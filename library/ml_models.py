@@ -50,6 +50,65 @@ def make_veto_dataset(
 
     return df, df_dqb_veto
 
+# %% Helper function to store the predictions, probabilties and true values per model
+def create_model_prob_df(
+    model_name: str,
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    y_prob: np.ndarray | None,
+    indices: pd.Index,
+    dataset_type: str = "full",
+    fold_number: int | None = None,
+) -> pd.DataFrame:
+    """
+    Build a “long” DataFrame with one row per sample.
+
+    Columns will be:
+      - model_name
+      - dataset_type
+      - fold_number
+      - true_label
+      - prediction
+      - predicted_prob    (if y_prob is 1D)
+      - OR prob_class_0 … prob_class_{C-1}  (if y_prob is 2D)
+
+    Args:
+        model_name:   name of the model (e.g. "XGBoost")
+        y_true:       shape = (N,) array of true labels
+        y_pred:       shape = (N,) array of predicted labels
+        y_prob:       None, or shape = (N,) (binary−prob), or (N, C) for C classes
+        indices:      length−N Index (e.g. X_full.index)
+        dataset_type: e.g. "full", "val", etc.
+        fold_number:  int or None
+
+    Returns:
+        pd.DataFrame of shape (N, …) with the appropriate columns.
+    """
+    df = pd.DataFrame({
+        "model_name":   model_name,
+        "dataset_type": dataset_type,
+        "fold_number":  fold_number,
+        "true_label":   y_true,
+        "prediction":   y_pred,
+    }, index=indices)
+
+    if y_prob is None:
+        # No probability column
+        return df.reset_index(drop=True)
+
+    # If y_prob is 1D, store it under “predicted_prob”
+    if y_prob.ndim == 1:
+        df["predicted_prob"] = y_prob
+        return df.reset_index(drop=True)
+
+    # Otherwise, assume y_prob.ndim == 2 (multiclass)
+    n_classes = y_prob.shape[1]
+    prob_cols = [f"prob_class_{c}" for c in range(n_classes)]
+    prob_df = pd.DataFrame(y_prob, columns=prob_cols, index=indices)
+    df = df.join(prob_df)
+    return df.reset_index(drop=True)
+
+# %%
 
 def train_xgboost(train_data: pd.DataFrame,
                   train_labels: np.ndarray,
@@ -58,120 +117,197 @@ def train_xgboost(train_data: pd.DataFrame,
 
     def specificity_loss(preds, dtrain):
         """
-        Custom loss function to approximate maximizing specificity.
-
-        Args:
-        - preds: Predicted probabilities.
-        - dtrain: DMatrix with labels.
-
-        Returns:
-        - grad: Gradient of the loss function.
-        - hess: Hessian of the loss function.
+        Custom loss to weight negative examples 3.2× harder (i.e. penalize false positives 3.2×).
         """
         labels = dtrain.get_label()
-        preds = 1 / (1 + np.exp(-preds))  # Convert logits to probabilities
+        probs  = 1.0 / (1.0 + np.exp(-preds))   # σ(s)
 
-        # Calculate gradients and hessians
-        grad = -labels * (1 - preds) + (1 - labels) * preds * 3.2  # Penalize FP more
-        hess = preds * (1 - preds) * (1 + (1 - labels))
+        # gradient:
+        #   if y=1:  ∂L/∂s = –(1 – σ(s))       (standard logistic for positives)
+        #   if y=0:  ∂L/∂s =  3.2·σ(s)          (3.2× negative‐class logistic)
+        grad = np.where(labels == 1,
+                        -(1.0 - probs),
+                        3.2 * probs)
+
+        # Hessian:
+        #   if y=1:   ∂²L/∂s² = σ(s)(1 – σ(s))
+        #   if y=0:   ∂²L/∂s² = 3.2·σ(s)(1 – σ(s))
+        hess = np.where(labels == 1,
+                        probs * (1.0 - probs),
+                        3.2 * probs * (1.0 - probs))
 
         return grad, hess
 
     def specificity_eval_metric(preds, dtrain):
         """
-        Custom evaluation metric to calculate specificity.
-
-        Args:
-        - preds: Predicted probabilities.
-        - dtrain: DMatrix with labels.
-
-        Returns:
-        - name: Name of the metric.
-        - result: Computed specificity.
+        Custom evaluation: compute specificity at prob>0.5.
         """
         labels = dtrain.get_label()
-        preds = (preds > 0.5).astype(int)  # Threshold at 0.5
-        tn = np.sum((labels == 0) & (preds == 0))
-        fp = np.sum((labels == 0) & (preds == 1))
-        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+        probs  = 1.0 / (1.0 + np.exp(-preds))
+        binary = (probs > 0.5).astype(int)
+        tn = np.sum((labels == 0) & (binary == 0))
+        fp = np.sum((labels == 0) & (binary == 1))
+        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
         return 'specificity', specificity
 
-
     def find_best_threshold_for_predictions(y_true_train: np.ndarray,
-                                            y_pred_train: np.ndarray,
+                                            y_pred_proba_train: np.ndarray,
                                             metric: str = 'specificity') -> float:
         """
-        Find the best threshold for binary classification predictions based on a specific metric.
-        Uses optimization for fine-tuned threshold selection.
-
-        :param y_true_train: Ground truth binary labels.
-        :param y_pred_train: Predicted probabilities (or scores).
-        :param metric: Metric to optimize. Options: 'f1', 'accuracy', 'precision', 'recall', 'auc'.
-        :return: Best threshold based on the metric.
+        Given true labels and predicted probabilities (not logits!), find the threshold in [0,1]
+        that maximizes the chosen metric.
         """
-
-        def metric_for_threshold(threshold):
-            y_pred_thresh = (y_pred_train >= threshold).astype(int)
+        def metric_for_threshold(thresh):
+            y_pred_thresh = (y_pred_proba_train >= thresh).astype(int)
             if metric == 'f1':
                 return -f1_score(y_true_train, y_pred_thresh)
             elif metric == 'accuracy':
                 return -accuracy_score(y_true_train, y_pred_thresh)
-            elif metric == 'sensitivity':  # Sensitivity (Recall)
+            elif metric == 'sensitivity':  # Recall
                 return -recall_score(y_true_train, y_pred_thresh)
-            elif metric == 'specificity':  # Specificity (True Negative Rate)
+            elif metric == 'specificity':
                 tn, fp, fn, tp = confusion_matrix(y_true_train, y_pred_thresh).ravel()
-                specificity = tn / (tn + fp)
-                return -specificity
+                spec = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+                return -spec
             elif metric == 'auc':
                 return -roc_auc_score(y_true_train, y_pred_thresh)
             else:
-                raise ValueError("Unsupported metric. Choose from 'f1', 'accuracy', 'sensitivity', 'specificity', 'auc'.")
+                raise ValueError("Unsupported metric: " + metric)
 
-        # Use scalar minimization for the threshold search
         result = minimize_scalar(metric_for_threshold, bounds=(0.0, 1.0), method='bounded')
-        best_threshold = result.x
-        best_metric_value = -result.fun
+        return result.x  # this is “best threshold”
 
-        # print(f"Best threshold based on {metric}: {best_threshold:.4f} with score: {best_metric_value:.4f}")
-        return best_threshold
-
-
-    params = {
-        'scale_pos_weight': 16,
-        'max_depth': 12,
-        'reg_lambda': 0.001,
-        'gamma': 0.2,
-        'reg_alpha': 0.1,
-        'objective': 'binary:logistic',
-        'eval_metric': 'logloss'
-    }
+    # ----------------------------
+    # 1. Build DMatrices
+    # ----------------------------
     dtrain = xgb.DMatrix(train_data, label=train_labels)
-    dval = xgb.DMatrix(val_data, label=val_labels)
+    dval   = xgb.DMatrix(val_data,   label=val_labels)
 
-    model = xgb.train(params,
-                      dtrain,
-                      num_boost_round=2,
-                      custom_metric=specificity_eval_metric,
-                      obj=specificity_loss,
-                      evals=[(dtrain, 'train'), (dval, 'valid')],
-                      verbose_eval=False, # 200,
+    # ----------------------------
+    # 2. XGBoost parameters
+    # ----------------------------
+    params = {
+        'scale_pos_weight': 16,   # (optional: you may want to remove this if you already weight via custom loss)
+        'max_depth':       12,
+        'reg_lambda':      0.001,
+        'gamma':           0.2,
+        'reg_alpha':       0.1,
+        # 'objective':   'binary:logistic',  # removed, since we use a custom objective
+        'eval_metric':     'logloss'
+    }
 
-                      )
+    # ----------------------------
+    # 3. Train with custom loss + custom eval
+    #    Note: in newer XGB versions use `feval=` for custom eval instead of `custom_metric=`
+    # ----------------------------
+    model = xgb.train(
+        params,
+        dtrain,
+        num_boost_round=2,
+        obj=specificity_loss,
+        custom_metric=specificity_eval_metric,
+        evals=[(dtrain, 'train'), (dval, 'valid')],
+        verbose_eval=False
+    )
+
+    # ----------------------------
+    # 4. Find “best threshold” based on training set specificity
+    # ----------------------------
+    raw_logits_train = model.predict(dtrain)
+    probs_train      = 1.0 / (1.0 + np.exp(-raw_logits_train))  # sigmoid
 
     best_threshold = find_best_threshold_for_predictions(
         y_true_train=train_labels,
-        y_pred_train=model.predict(dtrain),
+        y_pred_proba_train=probs_train,
         metric='specificity'
     )
-    # print(f'Best Threshold: {best_threshold}')
 
-    y_pred_val = (model.predict(dval) > best_threshold).astype(int)
-    y_pred_prob_val = model.predict(dval)
+    # ----------------------------
+    # 5. Produce final predictions on validation set
+    # ----------------------------
+    raw_logits_val = model.predict(dval)
+    probs_val      = 1.0 / (1.0 + np.exp(-raw_logits_val))
+    y_pred_val     = (probs_val > best_threshold).astype(int)
 
-    y_pred_train = (model.predict(dtrain) > best_threshold).astype(int)
-    y_pred_prob_train = model.predict(dtrain)
+    raw_logits_tr = raw_logits_train  # already computed
+    y_pred_tr     = (probs_train > best_threshold).astype(int)
 
-    return y_pred_val, y_pred_prob_val, y_pred_train, y_pred_prob_train
+    # feature importance
+    # from xgboost import plot_importance
+    # path_feature_imp = r'C:\Users\giorg\OneDrive - Fundacion Raices Italo Colombianas\projects\NarcCataplexyQuestionnaire\results'
+    # importance_types = ['weight', 'gain', 'cover']
+    #
+    # # feature importance
+    # imp_store = {}
+    # for t in importance_types:
+    #     scores = model.get_score(importance_type=t)
+    #     imp_store[t] = scores
+    # df_imp = pd.DataFrame(imp_store)
+    # df_imp.reset_index(inplace=True, names=['feature'], drop=False)
+    # df_imp.sort_values(by='gain', inplace=True, ascending=False)
+    #
+    # def save_xgb_feature_importance(
+    #         model,
+    #         csv_path: str,
+    #         png_path: str = None,
+    #         importance_type: str = 'weight',
+    #         figsize: tuple = (8, 6),
+    #         dpi: int = 300
+    # ):
+    #     """
+    #     Extracts feature importance from a trained XGBoost model, saves it as a CSV,
+    #     and (optionally) saves a bar‐chart PNG of the importances.
+    #
+    #     Args:
+    #         model: A trained xgboost.Booster or xgboost.XGBModel.
+    #         csv_path: File path (including filename) where the CSV of importances will be saved.
+    #         png_path: (Optional) File path (including filename) where the PNG plot will be saved.
+    #                   If None, no plot is generated.
+    #         importance_type: One of {'weight', 'gain', 'cover', 'total_gain', 'total_cover'}.
+    #                          Defaults to 'weight'.
+    #         figsize: Tuple specifying the figure size for the plot (width, height). Defaults to (8, 6).
+    #         dpi: Resolution in dots per inch for the saved PNG. Defaults to 300.
+    #     """
+    #     # 1. Extract raw feature‐importance dictionary
+    #     importance_dict = model.get_score(importance_type=importance_type)
+    #
+    #     # 2. Convert to DataFrame and sort descending
+    #     fi_df = pd.DataFrame({
+    #         'feature': list(importance_dict.keys()),
+    #         'importance': list(importance_dict.values())
+    #     })
+    #     fi_df = fi_df.sort_values(by='importance', ascending=False).reset_index(drop=True)
+    #
+    #     # 3. Save DataFrame to CSV
+    #     fi_df.to_csv(csv_path, index=False)
+    #     print(f"Feature importance CSV saved to: {csv_path}")
+    #
+    #     # 4. (Optional) Plot and save as PNG
+    #     if png_path:
+    #         fig, ax = plt.subplots(figsize=figsize)
+    #         plot_importance(
+    #             model,
+    #             ax=ax,
+    #             importance_type=importance_type,
+    #             title=f"XGBoost Feature Importance ({importance_type})"
+    #         )
+    #         ax.set_ylabel('Features')
+    #         ax.set_xlabel(f'Importance ({importance_type})')
+    #         fig.tight_layout()
+    #         fig.savefig(png_path, dpi=dpi)
+    #         plt.close(fig)
+    #         print(f"Feature importance plot saved to: {png_path}")
+    #
+    # save_xgb_feature_importance(
+    #     model=model,
+    #     csv_path='xgb_feature_importance.csv',
+    #     png_path='xgb_feature_importance.png',
+    #     importance_type='gain',  # or 'weight', 'cover', etc.
+    #     figsize=(10, 8),
+    #     dpi=200
+    # )
+
+    return y_pred_val, probs_val, y_pred_tr, probs_train
 
 
 def okun_decision(fold_split: pd.DataFrame,
@@ -343,9 +479,10 @@ def model_find_best_ess_threshold(train_data: np.ndarray,
 def classify_predictions(predictions: np.ndarray,
                          labels: np.ndarray,
                          indices: np.ndarray,
-                         fold: int,
                          model_name:str,
-                         dataset_type: str) -> pd.DataFrame:
+                         dataset_type: str,
+                         fold: Optional[int] = None,
+                         ) -> pd.DataFrame:
     """
     Classify each observation as True Positive (TP), True Negative (TN),
     False Positive (FP), or False Negative (FN).
@@ -374,19 +511,322 @@ def classify_predictions(predictions: np.ndarray,
         'dataset_type': dataset_type  # 'train' or 'validation'
     })
 
+def compute_full_training(models:Dict[str, object],
+                         df_model:pd.DataFrame,
+                         features:list[str],
+                         target:str):
+    """
+
+    :param models:
+    :param df_model:
+    :param features:
+    :param target:
+    :return:
+    """
+    def _data_imputation_all(data: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
+        """
+        Impute missing values on the entire DataFrame at once (no folds).
+        Uses IterativeImputer with BayesianRidge for continuous features and rounds
+        any ordinal (categorical) columns to the nearest integer after imputation.
+        If verbose=True, prints before/after summaries for columns that had missing values.
+        """
+        # Define which columns are categorical (ordinal) vs. continuous
+        categorical_var = [
+            'sex', 'Ethnicity', 'LAUGHING', 'ANGER', 'EXCITED', 'SURPRISED', 'HAPPY',
+            'EMOTIONAL', 'QUICKVERBAL', 'EMBARRAS', 'DISCIPLINE', 'SEX', 'DURATHLETIC',
+            'AFTATHLETIC', 'ELATED', 'STRESSED', 'STARTLED', 'TENSE', 'PLAYGAME',
+            'ROMANTIC', 'JOKING', 'MOVEDEMOT', 'KNEES', 'JAW', 'HEAD', 'HAND', 'SPEECH'
+        ]
+        continuous_var = ['Age', 'BMI', 'ESS']
+
+        # Filter to only columns that actually exist
+        covariates_list = [col for col in (continuous_var + categorical_var) if col in data.columns]
+        # Identify columns with any missing values
+        cols_with_nans = data.columns[data.isna().sum() > 0]
+
+        if len(cols_with_nans) == 0:
+            if verbose:
+                print("No imputation required: no columns have missing values.")
+            return data.copy()
+
+        if verbose:
+            print(f"Columns to impute ({len(cols_with_nans)}): {list(cols_with_nans)}")
+            print("=== Before Imputation ===")
+            print("Missing value counts:")
+            print(data[cols_with_nans].isna().sum())
+            print("\nDescriptive statistics for those columns:")
+            print(data[cols_with_nans].describe())
+
+        # Make a copy to avoid overwriting the original
+        df_impute = data.copy()
+
+        # Track whether each selected column is continuous or ordinal
+        covariates = {col: 'continuous' for col in continuous_var if col in covariates_list}
+        covariates.update({col: 'ordinal' for col in categorical_var if col in covariates_list})
+
+        # Initialize IterativeImputer
+        imputer = IterativeImputer(
+            estimator=BayesianRidge(),
+            max_iter=100,
+            tol=1e-3,
+            n_nearest_features=2,
+            initial_strategy="mean",
+            imputation_order="ascending"
+        )
+
+        # Fit & transform in one shot on the selected columns
+        imputed_array = imputer.fit_transform(df_impute[covariates_list])
+        df_imputed = pd.DataFrame(imputed_array, columns=covariates_list, index=df_impute.index)
+
+        # Round any ordinal columns to the nearest integer
+        for col, col_type in covariates.items():
+            if col_type == 'ordinal':
+                df_imputed[col] = np.round(df_imputed[col]).astype(int)
+
+        # Replace original columns with imputed values
+        df_impute[covariates_list] = df_imputed[covariates_list]
+
+        if verbose:
+            print("\n=== After Imputation ===")
+            print("Missing value counts (should be zero now):")
+            print(df_impute[cols_with_nans].isna().sum())
+            print("\nDescriptive statistics for formerly missing columns:")
+            print(df_impute[cols_with_nans].describe())
+
+        return df_impute
+
+    scaler = StandardScaler()
+    if 'ESS' in features:
+        df_model['ESS'] = scaler.fit_transform(df_model[["ESS"]])
+
+    data = df_model[features]
+    labels = df_model[target]
+
+    # 1) Impute missing values once on the whole dataset
+    imputed_data = _data_imputation_all(data, verbose=True)
+
+    # 2) Prepare X (features) and y (labels)
+    X_full = imputed_data.copy()
+    y_full = labels.values.ravel()
+
+    # 3) Prepare containers for metrics and classifications
+    metrics_records = []
+    classification_records = []
+    elastic_net_coefs_list = []
+    elastic_net_predictions_list = []
+    model_prob_records  = []
+    # 4) Loop over each model, train on full data, and predict on the same full data
+    for model_name, model in models.items():
+
+        # OPTIONAL: If your model has special cases (e.g., “Threshold on ESS” or “Okun Tree”),
+        # handle them first. Otherwise, do a straight fit‐predict on all data.
+
+        if model_name == "Threshold on ESS":
+            # Compute best threshold on the full data
+            best_threshold = models["Threshold on ESS"](X_full["ESS"], y_full)
+            # Predict on full data using that threshold
+            y_pred_full = (X_full["ESS"] >= best_threshold).astype(int)
+
+            # Compute metrics on full dataset
+            metrics = compute_metrics(y_pred_full, y_full)
+            metrics.update({'model': model_name, 'best_threshold': best_threshold})
+            metrics_records.append(metrics)
+
+            # Classify the full‐data predictions
+            full_classification = classify_predictions(
+                predictions=y_pred_full,
+                labels=y_full,
+                indices=X_full.index,
+                fold=None,  # No fold in a “train/test‐on‐all” scenario
+                dataset_type='full',
+                model_name=model_name
+            )
+            classification_records.append(full_classification)
+            continue
+
+        if model_name == "Okun Tree":
+            # The Okun Tree presumably only needs X_full to predict
+            y_pred_full = models["Okun Tree"](fold_split=X_full)
+
+            # Compute metrics on full dataset
+            metrics = compute_metrics(y_pred_full, y_full)
+            metrics.update({'model': model_name})
+            metrics_records.append(metrics)
+
+            full_classification = classify_predictions(
+                predictions=y_pred_full,
+                labels=y_full,
+                indices=X_full.index,
+                fold=None,
+                dataset_type='full',
+                model_name=model_name
+            )
+            classification_records.append(full_classification)
+            continue
+
+        if model_name == "XGBoost":
+            # If your XGBoost wrapper expects (train_data, train_labels, val_data, val_labels),
+            # you can simply pass the same full‐data for both train & val.
+            (y_pred_full,
+             y_prob_full,
+             y_pred_train_full,
+             y_prob_train_full) = models["XGBoost"](
+                train_data=X_full,
+                train_labels=y_full,
+                val_data=X_full,
+                val_labels=y_full)
+
+            # We only need the “val” outputs in this scenario since train=val
+            metrics = compute_metrics(y_pred_full, y_full)
+            metrics.update({'model': model_name})
+            metrics_records.append(metrics)
+
+            # Record classification on full data
+            full_classification = classify_predictions(
+                predictions=y_pred_full,
+                labels=y_full,
+                indices=X_full.index,
+                fold=None,
+                dataset_type='full',
+                model_name=model_name
+            )
+            classification_records.append(full_classification)
+            # collect the probabilites and predicitons of the models that have that
+            df_prob = create_model_prob_df(
+                model_name=model_name,
+                y_true=y_full,
+                y_pred=y_pred_full,
+                y_prob=y_prob_full,  # 1D or 2D array
+                indices=X_full.index,
+                dataset_type="full",
+                fold_number=None
+            )
+            model_prob_records.append(df_prob)
+
+            # If you care about ElasticNet‐style net benefit curves, etc., you could still record
+            # y_prob_full here. But since this branch is “XGBoost,” skip ElasticNet logic.
+            continue
+
+        # ------------------------------------------------------------
+        # For all other scikit‐learn–style estimators (e.g., LogisticRegression,
+        # RandomForestClassifier, ElasticNetClassifier, etc.)
+        # ------------------------------------------------------------
+        # 1) Normalize continuous features if needed (same logic you had for folds)
+        if model_name not in ["Threshold on ESS", "Okun Tree", "XGBoost"]:
+            col_cont = [
+                col
+                for col in X_full.columns
+                if not set(X_full[col].dropna().unique()).issubset({0, 1})
+            ]
+            if len(col_cont) > 0:
+                scaler = StandardScaler()
+                X_full[col_cont] = scaler.fit_transform(X_full[col_cont])
+
+        # 2) Fit on the full dataset
+        model.fit(X_full, y_full)
+
+        # 3) Predict on the full dataset
+        y_pred_full = model.predict(X_full)
+
+        # 4) If probabilities are needed (e.g., for ElasticNet decision curves):
+        if hasattr(model, "predict_proba"):
+            try:
+                y_prob_full = model.predict_proba(X_full)[:, 1]
+            except Exception:
+                y_prob_full = None
+        else:
+            y_prob_full = None
+
+        # 5) Compute metrics on the full dataset
+        metrics = compute_metrics(y_pred_full, y_full)
+        metrics.update({'model': model_name})
+        metrics_records.append(metrics)
+
+        # 6) Record a “classification” row for every sample in X_full
+        full_classification = classify_predictions(
+            predictions=y_pred_full,
+            labels=y_full,
+            indices=X_full.index,
+            fold=None,
+            dataset_type='full',
+            model_name=model_name
+        )
+        classification_records.append(full_classification)
+
+        # 7) Build “long” DF for this model’s probabilities (if y_prob_full is not None)
+        if y_prob_full is not None:
+            df_prob = create_model_prob_df(
+                model_name   = model_name,
+                y_true       = y_full,
+                y_pred       = y_pred_full,
+                y_prob       = y_prob_full,       # could be 1D
+                indices      = X_full.index,
+                dataset_type = "full",
+                fold_number  = None
+            )
+            model_prob_records.append(df_prob)
+
+
+        # 7) If it’s Elastic Net, collect coefficients + probability records
+        if model_name == 'Elastic Net':
+            elastic_net_coefs_list.append(model.coef_.flatten())
+
+
+    # (A) Concatenate all classification records
+    df_classifications = pd.concat(classification_records, ignore_index=True)
+    df_classifications = df_classifications.sort_values(
+        by=['model_name', 'fold'], na_position='last'
+    )
+
+    # (B) Build a DataFrame of aggregated metrics (no fold dimension here)
+    df_metrics = pd.DataFrame(metrics_records)
+
+    # (C) Concatenate all “model_prob_records” into a single DataFrame
+    if model_prob_records:
+        df_models_prob = pd.concat(model_prob_records, ignore_index=True)
+    else:
+        # If no model ever produced probabilities, return an empty DataFrame
+        df_models_prob = pd.DataFrame()
+
+    # (D) If you collected ElasticNet coefficients, build that DataFrame
+    if elastic_net_coefs_list:
+        feature_names = X_full.columns.tolist()
+        df_elastic_net_feature_importance = collect_elastic_net_coefficients_and_std(
+            elastic_net_coefs_list,
+            feature_names
+        )
+    else:
+        df_elastic_net_feature_importance = pd.DataFrame()
+
+    return (
+        df_metrics,  # aggregated metrics per model
+        df_classifications,  # per‐sample TP/TN/FN/FP/etc.
+        df_elastic_net_feature_importance,  # elastic net feature importances
+        df_models_prob  # long‐format “true_label / prediction / prob” table
+    )
+
 
 def compute_cross_validation(models:Dict[str, object],
                      df_model:pd.DataFrame,
                      features:list[str],
                      target:str,
-                     k:int=5) -> tuple[DataFrame, DataFrame, DataFrame, DataFrame]:
+                     k:int=5) -> tuple[DataFrame, DataFrame, DataFrame, DataFrame,DataFrame]:
     """
+
+    For each model_name in `models`, and for each fold in `imputed_folds`:
+      1. Preprocess (standardize continuous features) unless special model.
+      2. Handle special models ("ESS" threshold, "Okun Tree", "XGBoost") separately.
+      3. Fit generic classifiers, predict & compute metrics.
+      4. Record per-fold metrics, per-sample classifications, and per-sample probabilities.
+
     Run the stratified k-fold cross validation of each of the expected models in the dictionary of objects
     present in this library file. Compute the metrics and records which observation is a TP, TN, FN, and FP.
     :param models:
-    :return:
-        - Average metrics of each model across the folds with confidence intervals for specificity and sensitivity
-        - classification results of each observation (TP, TN, FN, FP) with the labels and indexes from the source
+        df_avg_metrics:              DataFrame with average metrics + confidence intervals, sorted by specificity.
+        df_classifications:          Concatenated per-sample classification info (TP/TN/FP/FN details).
+        df_elastic_net_feature_importance: DataFrame of Elastic Net coefficients and standard errors.
+        df_elastic_net_predictions:  Concatenated predictions & probabilities from Elastic Net, per fold.
+        df_models_prob:              Long-format DataFrame of all models’ per-sample probabilities, labels, predictions.
     """
 
     def save_imputed_folds(imputed_folds: list,
@@ -507,191 +947,265 @@ def compute_cross_validation(models:Dict[str, object],
         })
     # save_imputed_folds(imputed_folds=imputed_folds, save_path=r'\NarcCataplexyQuestionnaire\data')
 
-    # Aggregate metrics DataFrame
+    # Containers for all results
     metrics_records = []
-    classification_records = []  # Store all classifications
+    classification_records = []
     elastic_net_coefs_list = []
-    elastic_net_predictions_list = []  # store elastic net predicted prob for net benefit curves
+    elastic_net_predictions_list = []
+    model_prob_records = []  # Will hold DataFrames from create_model_prob_df()
+
+    # Iterate over each model and each fold
     for model_name, model in models.items():
-        model_name = "Elastic Net"
-        model = models.get(model_name)
-        for fold, fold_data in enumerate(imputed_folds):
-            train_data = fold_data.get('train_data').copy()
-            val_data = fold_data.get('val_data').copy()
-            train_labels = fold_data.get('train_labels')
-            val_labels = fold_data.get('val_labels')
-            # df_visualize = val_data.copy()
-            # df_visualize['NT1'] = val_labels
-            # print(f'\nfold {fold}')
-            # visualize_table(df=df_visualize, group_by=['NT1', 'DQB10602'])
+        for fold_idx, fold_data in enumerate(imputed_folds, start=1):
+            # Extract train/validation splits
+            train_data = fold_data['train_data'].copy()
+            val_data = fold_data['val_data'].copy()
+            train_labels = fold_data['train_labels']
+            val_labels = fold_data['val_labels']
 
-            if not model_name in ["Threshold on ESS", "Okun Tree"]:
-                # normalize continuous features, the rest of the data is sparse
-                col_cont = [col for col in train_data.columns if
-                            not set(train_data[col].dropna().unique()).issubset({0, 1})]
+            # ----------------------------------------
+            # 1) STANDARDIZE continuous features (except for special models)
+            # ----------------------------------------
+            if model_name not in ["Threshold on ESS", "Okun Tree"]:
+                cont_cols = [
+                    col for col in train_data.columns
+                    if not set(train_data[col].dropna().unique()).issubset({0, 1})
+                ]
+                if cont_cols:
+                    scaler = StandardScaler()
+                    train_data[cont_cols] = scaler.fit_transform(train_data[cont_cols])
+                    val_data[cont_cols] = scaler.transform(val_data[cont_cols])
 
-                scaler = StandardScaler()
-                train_data[col_cont] = scaler.fit_transform(train_data[col_cont])
-                val_data[col_cont] = scaler.transform(val_data[col_cont])
-
-            # Selecting features for ESS-only and ESS + Age + Gender models
+            # ----------------------------------------
+            # 2) SPECIAL MODEL VARIANTS: ESS, Okun Tree
+            # ----------------------------------------
             if model_name == "LogReg (ESS Only)":
+                # Limit features to ESS only
                 train_data = train_data[['ESS']]
                 val_data = val_data[['ESS']]
 
             elif model_name == "LogReg (ESS + Age + Gender)":
+                # Limit features to ESS, Age, sex
                 if not all(col in train_data.columns for col in ['Age', 'sex']):
+                    # Skip if required columns are missing
                     continue
                 train_data = train_data[['ESS', 'Age', 'sex']]
                 val_data = val_data[['ESS', 'Age', 'sex']]
 
-            elif model_name == "Threshold on ESS":
-                # Compute the best threshold from training data
-                best_threshold = models.get("Threshold on ESS")(train_data['ESS'], train_labels)
-                # Apply threshold to validation data
-                predictions = (val_data['ESS'] >= best_threshold).astype(int)
+            if model_name == "Threshold on ESS":
+                # — Compute best threshold on training ESS —
+                best_threshold = models["Threshold on ESS"](train_data['ESS'], train_labels)
+                # — Apply threshold to validation ESS —
+                y_pred_val = (val_data['ESS'] >= best_threshold).astype(int)
 
-                # Compute metrics
-                metrics = compute_metrics(predictions, val_labels)
-                metrics.update({'fold': fold + 1, 'model': model_name, 'best_threshold': best_threshold})
+                # (a) Metrics for this fold
+                metrics = compute_metrics(y_pred_val, val_labels)
+                metrics.update({'fold': fold_idx, 'model': model_name, 'best_threshold': best_threshold})
                 metrics_records.append(metrics)
 
-                val_classification = classify_predictions(predictions=predictions,
-                                                          labels=val_labels,
-                                                          indices=val_data.index,
-                                                          fold=fold + 1,
-                                                          dataset_type='validation',
-                                                          model_name=model_name)
-
+                # (b) Per-sample classification details
+                val_classification = classify_predictions(
+                    predictions=y_pred_val,
+                    labels=val_labels,
+                    indices=val_data.index,
+                    fold=fold_idx,
+                    dataset_type='validation',
+                    model_name=model_name
+                )
                 classification_records.append(val_classification)
-                continue  # Skip next model
 
-            elif model_name == "Okun Tree":
-                predictions = models.get("Okun Tree")(fold_split=val_data)
-                # Compute metrics
-                metrics = compute_metrics(predictions, val_labels)
-                metrics.update({'fold': fold + 1, 'model': model_name})
+                # No probability output for this special case
+                continue  # Move to next fold
+
+            if model_name == "Okun Tree":
+                # — Predict with Okun Tree on validation set —
+                y_pred_val = models["Okun Tree"](fold_split=val_data)
+
+                # (a) Metrics
+                metrics = compute_metrics(y_pred_val, val_labels)
+                metrics.update({'fold': fold_idx, 'model': model_name})
                 metrics_records.append(metrics)
 
-                val_classification = classify_predictions(predictions=predictions,
-                                                          labels=val_labels,
-                                                          indices=val_data.index,
-                                                          fold=fold + 1,
-                                                          dataset_type='validation',
-                                                          model_name=model_name)
-
+                # (b) Classification detail
+                val_classification = classify_predictions(
+                    predictions=y_pred_val,
+                    labels=val_labels,
+                    indices=val_data.index,
+                    fold=fold_idx,
+                    dataset_type='validation',
+                    model_name=model_name
+                )
                 classification_records.append(val_classification)
-                continue
 
+                # No probability output
+                continue  # Move to next fold
 
-            elif model_name == "XGBoost":
-                y_pred_val, y_pred_prob_val, y_pred_train, y_pred_prob_train = models.get("XGBoost")(
+            if model_name == "XGBoost":
+                # — XGBoost train‐predict wrapper returns (pred_val, prob_val, pred_train, prob_train) —
+                (y_pred_val,
+                 y_prob_val,
+                 y_pred_train,
+                 y_prob_train) = models["XGBoost"](
                     train_data=train_data,
                     train_labels=train_labels,
                     val_data=val_data,
-                    val_labels=val_labels)
+                    val_labels=val_labels
+                )
 
+                # (a) Metrics on validation set
                 metrics = compute_metrics(y_pred_val, val_labels)
-                metrics.update({'fold': fold + 1, 'model': model_name})
+                metrics.update({'fold': fold_idx, 'model': model_name})
                 metrics_records.append(metrics)
 
-                # Classify train and validation sets
-
-                val_classification = classify_predictions(predictions=y_pred_val,
-                                                          labels=val_labels,
-                                                          indices=val_data.index,
-                                                          fold=fold + 1,
-                                                          dataset_type='validation',
-                                                          model_name=model_name)
-
+                # (b) Classification details on validation set
+                val_classification = classify_predictions(
+                    predictions=y_pred_val,
+                    labels=val_labels,
+                    indices=val_data.index,
+                    fold=fold_idx,
+                    dataset_type='validation',
+                    model_name=model_name
+                )
                 classification_records.append(val_classification)
 
-                continue
+                # (c) Record per-sample probabilities & predictions (validation)
+                df_prob = create_model_prob_df(
+                    model_name=model_name,
+                    y_true=val_labels,
+                    y_pred=y_pred_val,
+                    y_prob=y_prob_val,
+                    indices=val_data.index,
+                    dataset_type="validation",
+                    fold_number=fold_idx
+                )
+                model_prob_records.append(df_prob)
 
-            # Train model and predict
+                continue  # Skip to next fold/model
+
+            # ----------------------------------------
+            # 3) GENERIC MODEL: fit on train_data, predict on val_data
+            # ----------------------------------------
             model.fit(train_data, train_labels)
-            predictions = model.predict(val_data)
-            # Extract only the probability of the positive class (1)
-            # y_pred_prob = model.predict_proba(val_data)
-            #
-            # best_threshold = find_best_threshold_for_predictions(
-            #     y_true_train=train_labels,
-            #     y_pred_train=model.predict_proba(train_data)[:, 1],
-            #     metric='specificity'
-            # )
+            y_pred_val = model.predict(val_data)
 
-            # Compute metrics
-            metrics = compute_metrics(predictions, val_labels)
-            metrics.update({'fold': fold + 1, 'model': model_name})
+            # Extract positive‐class probabilities if available
+            if hasattr(model, "predict_proba"):
+                try:
+                    y_prob_val = model.predict_proba(val_data)[:, 1]
+                except Exception:
+                    y_prob_val = None
+            else:
+                y_prob_val = None
+
+            # (a) Compute metrics on validation set
+            metrics = compute_metrics(y_pred_val, val_labels)
+            metrics.update({'fold': fold_idx, 'model': model_name})
             metrics_records.append(metrics)
 
-            val_classification = classify_predictions(predictions=predictions,
-                                                      labels=val_labels,
-                                                      indices=val_data.index,
-                                                      fold=fold + 1,
-                                                      dataset_type='validation',
-                                                      model_name=model_name)
-
+            # (b) Per‐sample classification details
+            val_classification = classify_predictions(
+                predictions=y_pred_val,
+                labels=val_labels,
+                indices=val_data.index,
+                fold=fold_idx,
+                dataset_type='validation',
+                model_name=model_name
+            )
             classification_records.append(val_classification)
 
+            # (c) Record per-sample probabilities & predictions (if probability array exists)
+            if y_prob_val is not None:
+                df_prob = create_model_prob_df(
+                    model_name=model_name,
+                    y_true=val_labels,
+                    y_pred=y_pred_val,
+                    y_prob=y_prob_val,
+                    indices=val_data.index,
+                    dataset_type="validation",
+                    fold_number=fold_idx
+                )
+                model_prob_records.append(df_prob)
+
+            # (d) If Elastic Net, store coefficients + predictions for net‐benefit curves
             if model_name == 'Elastic Net':
-                # Elastic net is the best model, therefore we will collect the feature importance across the folds
-                # and report them with standard errors
                 elastic_net_coefs_list.append(model.coef_.flatten())
-                fold_df = pd.DataFrame({
-                    "model_name": model_name,
-                    "true_label": val_labels,
-                    "predicted_prob": model.predict_proba(val_data)[:, 1], # positive class
-                    "prediction": predictions,
-                    "fold_number": fold + 1  # Use fold+1 if you want fold numbering to start at 1
-                })
+
+                # Collect per‐sample predictions/probabilities for later net‐benefit analysis
+                fold_df = create_model_prob_df(
+                    model_name=model_name,
+                    y_true=val_labels,
+                    y_pred=y_pred_val,
+                    y_prob=y_prob_val,
+                    indices=val_data.index,
+                    dataset_type="validation",
+                    fold_number=fold_idx
+                )
                 elastic_net_predictions_list.append(fold_df)
 
-    df_classifications = pd.concat(classification_records)
-    df_classifications = df_classifications.sort_values(by=['model_name', 'fold'])
+    # ----------------------------------------
+    # 4) CONCATENATE RESULTS AFTER LOOP
+    # ----------------------------------------
 
+    # (A) All per-sample classification rows
+    df_classifications = pd.concat(classification_records, ignore_index=True)
+    df_classifications = df_classifications.sort_values(
+        by=['model_name', 'fold'], na_position='last'
+    )
 
+    # (B) Aggregate per-fold metrics into DataFrame
     df_agg_metrics = pd.DataFrame(metrics_records)
-    # Reordering columns to set 'model' and 'fold' as the first columns
-    df_agg_metrics = df_agg_metrics[
-        ['model', 'fold'] + [col for col in df_agg_metrics.columns if col not in ['model', 'fold']]]
+    # Reorder columns: make 'model' and 'fold' appear first
+    cols = ['model', 'fold'] + [c for c in df_agg_metrics.columns if c not in ('model', 'fold')]
+    df_agg_metrics = df_agg_metrics[cols]
 
-    # compute confidence intervals
-    df_ci = {}
+    # (C) Compute confidence intervals for sensitivity & specificity per model
+    ci_dict = {}
     metric_ci = ['sensitivity', 'specificity']
-    for model_ in df_agg_metrics['model'].unique():
-        df_ci[model_] = {}
+    for m in df_agg_metrics['model'].unique():
+        ci_dict[m] = {}
         for metric in metric_ci:
-            values = df_agg_metrics.loc[df_agg_metrics['model'] == model_, metric].values
-            df_ci[model_][f'{metric}_ci'] = compute_confidence_interval(values)
-    df_ci = pd.DataFrame.from_dict(df_ci, orient='index')
-    df_ci.reset_index(inplace=True)
-    df_ci.rename(columns={'index': 'model'}, inplace=True)
+            vals = df_agg_metrics.loc[df_agg_metrics['model'] == m, metric].values
+            ci_dict[m][f'{metric}_ci'] = compute_confidence_interval(vals)
+    df_ci = pd.DataFrame.from_dict(ci_dict, orient='index').reset_index().rename(columns={'index': 'model'})
 
-    # compute the average across the measures
-    df_avg_metrics = df_agg_metrics.groupby(['model']).mean(numeric_only=True).reset_index()
-    df_avg_metrics.drop(columns='fold',
-                        inplace=True)
+    # (D) Compute average metrics across folds (numeric columns), drop 'fold'
+    df_avg_metrics = df_agg_metrics.groupby('model').mean(numeric_only=True).reset_index()
+    if 'fold' in df_avg_metrics.columns:
+        df_avg_metrics = df_avg_metrics.drop(columns='fold')
+    # Merge CIs into the average‐metrics table
+    df_avg_metrics = df_avg_metrics.merge(df_ci, on='model', how='left')
     df_avg_metrics = df_avg_metrics.sort_values(by='specificity', ascending=False)
 
-    # include the confidence intervals in the measure
-    df_avg_metrics = pd.merge(left=df_avg_metrics,
-                              right=df_ci,
-                              on='model')
-
-    print(df_avg_metrics[['model', 'specificity_ci', 'sensitivity_ci']])
-
-    # From the collected coefficients for the elastic net model, compute the standard erros and model coeff
-    if len(elastic_net_coefs_list) > 0:
-        feature_names = train_data.columns.tolist()  # Using the last fold's train_data columns
-        df_elastic_net_feature_importance = collect_elastic_net_coefficients_and_std(elastic_net_coefs_list, feature_names)
+    # (E) Elastic Net: feature importance with standard errors
+    if elastic_net_coefs_list:
+        # Use last fold's train_data column order for feature names
+        feature_names = imputed_folds[-1]['train_data'].columns.tolist()
+        df_elastic_net_feature_importance = collect_elastic_net_coefficients_and_std(
+            elastic_net_coefs_list,
+            feature_names
+        )
     else:
         df_elastic_net_feature_importance = pd.DataFrame()
 
-    # getting the prediction probabilities of the elasticnet model to make the net benefit curves
-    df_elastic_net_predictions = pd.concat(elastic_net_predictions_list, ignore_index=True)
+    # (F) Elastic Net: concatenated per‐fold predictions & probabilities
+    if elastic_net_predictions_list:
+        df_elastic_net_predictions = pd.concat(elastic_net_predictions_list, ignore_index=True)
+    else:
+        df_elastic_net_predictions = pd.DataFrame()
 
-    return df_avg_metrics, df_classifications, df_elastic_net_feature_importance, df_elastic_net_predictions
+    # (G) All models' per-sample probabilities & predictions (long format)
+    if model_prob_records:
+        df_models_prob = pd.concat(model_prob_records, ignore_index=True)
+    else:
+        df_models_prob = pd.DataFrame()
+
+    return (
+        df_avg_metrics,
+        df_classifications,
+        df_elastic_net_feature_importance,
+        df_elastic_net_predictions,
+        df_models_prob
+    )
 
 
 
